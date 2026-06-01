@@ -62,7 +62,333 @@ class ReActAgent:
             
         logger.log_event("AGENT_END", {"steps": steps})
         return "Not implemented. Fill in the TODOs!"
+import re
 
+# 🗄️ DATABASE: Được thiết kế chi tiết với Fact và Insight để Agent dễ "bắt chữ" lên kịch bản
+ACTIVITIES_DB = {
+    "ha_noi": {
+        "am_thuc": [
+            {
+                "name": "Phở Gánh Hàng Chiếu (Ăn lúc 3h sáng)",
+                "fact": "Quán phở mở vào khung giờ linh hồn, khách phải xếp hàng rồng rắn giữa đêm lạnh chỉ để ăn một bát phở bò sốt vang.",
+                "insight_gap": "Đối thủ thường làm review trải nghiệm khen ngon. Khoảng trống: Làm video thử thách 'Thức xuyên đêm ăn phở gánh và cái kết buồn ngủ sấp mặt' hoặc châm biếm 'Có đáng để hành xác vì một bát phở?'"
+            },
+            {
+                "name": "Cà phê Đường Tàu (Phố Phùng Hưng/Điện Biên Phủ)",
+                "fact": "Mặc dù bị cấm và rào chắn vì an toàn, các quán cafe ở đây vẫn hoạt động 'chui' bằng cách có người dắt tay khách qua chốt.",
+                "insight_gap": "Chưa ai làm clip POV đóng vai 'Điệp viên vượt biên' đi uống cafe tàu hỏa dưới góc nhìn hài hước. Né kiểu quay cinematic đẹp đẽ thông thường."
+            }
+        ],
+        "check_in": [
+            {
+                "name": "Toà soạn Báo Hà Nội Mới",
+                "fact": "Góc tường vàng kinh điển mà ai đến Hà Nội cũng chụp, nhưng luôn trong tình trạng xếp hàng và dính người khác vào khung hình.",
+                "insight_gap": "Làm kịch bản hướng dẫn 'Văn hoá xếp hàng chụp ảnh bờ Hồ' hoặc mẹo chỉnh ảnh xoá người bằng AI cực lầy lội."
+            },
+            {
+                "name": "Chợ hoa đêm Quảng An (2h sáng)",
+                "fact": "Nơi bán buôn hoa lớn nhất Hà Nội lúc rạng đông, ánh sáng đèn led mờ ảo lên hình rất nghệ thuật nhưng mùi tanh của nước và đá rã rất khó chịu.",
+                "insight_gap": "Làm nội dung kiểu tương phản (Kỳ vọng vs Thực tế): Trên mạng là nàng thơ ôm hoa thơ mộng, thực tế là lạnh thấu xương và suýt bị xe chở hoa tông."
+            }
+        ],
+        "hidden_gem": [
+            {
+                "name": "Hẻm ngõ siêu nhỏ Phố Cổ (Ngõ 10 Hàng Trống)",
+                "fact": "Những con ngõ chỉ vừa đúng một người đi nghiêng, tối tăm và sâu hun hút, dẫn vào không gian sống của 3-4 thế hệ người Hà Nội cổ.",
+                "insight_gap": "Hợp với Creator thích style học thuật/trải nghiệm: Khám phá 'Bất động sản nghìn đô nhưng đi phải nín thở' tại Hà Nội."
+            }
+        ]
+    },
+    "sai_gon": {
+        "am_thuc": [
+            {
+                "name": "Cơm tấm bãi rác (Quận 4)",
+                "fact": "Tên gọi do nằm gần bến trung chuyển rác cũ, giá một đĩa cơm sườn lên tới 100k - 150k (đắt hơn nhà hàng sang trọng) nhưng vẫn đông nghẹt.",
+                "insight_gap": "Góc tiếp cận: Đánh giá xem 'Cơm tấm nhà giàu núp bóng bãi rác' có thực sự xứng đáng với giá tiền hay chỉ là chiêu trò marketing."
+            },
+            {
+                "name": "Cà phê bệt Nhà Thờ Đức Bà",
+                "fact": "Không bàn, không ghế, chỉ có tờ báo giấy trải xuống đất và ly cafe sữa đá 20k nhưng là linh hồn của giới trẻ Sài Gòn.",
+                "insight_gap": "Làm video so sánh văn hoá: 'Trà chanh vỉa hè Hà Nội' vs 'Cà phê bệt Sài Gòn' dưới góc nhìn hài hước, phân tích hành vi ngồi bệt."
+            }
+        ],
+        "check_in": [
+            {
+                "name": "Chung cư 42 Nguyễn Huệ",
+                "fact": "Khu chung cư cũ biến đổi thành tổ hợp cafe, mỗi căn hộ một style. Đi thang máy phải trả tiền (khoảng 5k-10k/lượt).",
+                "insight_gap": "Kịch bản châm biếm: 'Cẩm nang sinh tồn khi đi cafe chung cư 42': Làm sao để không mất tiền thang máy mà vẫn check-in được hết các tầng."
+            },
+            {
+                "name": "Bến Bạch Đằng lúc hoàng hôn",
+                "fact": "Nơi ngắm hoàng hôn ngắm Landmark 81 cực đẹp nhưng siêu đông cặp đôi và các bạn làm TikToker ra quay giật giật.",
+                "insight_gap": "Góc POV hài hước: 'Một mét vuông 10 ông TikToker' - Đi tìm sự bình yên giả trân tại bến Bạch Đằng."
+            }
+        ],
+        "hidden_gem": [
+            {
+                "name": "Hẻm Nhật Bản (Little Japan Town - Lê Thánh Tôn)",
+                "fact": "Con hẻm yên tĩnh ban ngày với các cửa gỗ kéo style Nhật, nhưng ban đêm biến thành khu phố đèn đỏ náo nhiệt với các quán bar chìm.",
+                "insight_gap": "Làm content theo format 'Khám phá hai mặt đối lập của một con hẻm' (Style chữa lành ban ngày vs Style quẩy ban đêm)."
+            }
+        ]
+    }
+}
+
+def clean_input(text: str) -> str:
+    """Chuẩn hóa tiếng Việt không dấu và viết liền để dễ map key"""
+    text = text.lower().strip()
+    # Chuyển đổi một số từ thông dụng
+    text = re.sub(r'[àáạảãâầấậẩẫăằắặẳẵ]', 'a', text)
+    text = re.sub(r'[èéẹẻẽêềếệểễ]', 'e', text)
+    text = re.sub(r'[ìíịỉĩ]', 'i', text)
+    text = re.sub(r'[òóọỏõôồốộổỗơờớợởỡ]', 'o', text)
+    text = re.sub(r'[ùúụủũưừứựửữ]', 'u', text)
+    text = re.sub(r'[ỳýỵỷỹ]', 'y', text)
+    text = re.sub(r'[đ]', 'd', text)
+    text = text.replace("ho chi minh", "sai gon").replace("hcm", "sai gon")
+    text = text.replace(" ", "_")
+    return text
+
+def getActivity(city: str, categories: str) -> dict:
+    """
+    Tool gợi ý địa điểm, kèm sự thật (fact) và khoảng trống nội dung (insight_gap)
+    
+    Parameters:
+    - city (str): 'Ha Noi' hoặc 'Sai Gon'
+    - categories (str): 'am_thuc', 'check_in', 'hidden_gem'
+    """
+    city_key = clean_input(city)
+    cate_key = clean_input(categories)
+    
+    # Kiểm tra thành phố
+    if city_key not in ACTIVITIES_DB:
+        return {"error": f"Hiện tại tool chỉ hỗ trợ dữ liệu cho 'ha_no' hoặc 'sai_gon'. Bạn nhập: '{city}'"}
+        
+    # Kiểm tra category
+    if cate_key not in ACTIVITIES_DB[city_key]:
+        valid_cates = ", ".join(ACTIVITIES_DB[city_key].keys())
+        return {"error": f"Không tìm thấy danh mục '{categories}'. Hãy chọn một trong các danh mục: {valid_cates}"}
+        
+    return {
+        "status": "success",
+        "city": city,
+        "category": categories,
+        "data": ACTIVITIES_DB[city_key][cate_key]
+    }
+
+    def getContent(activity_item: dict, creator_persona: dict, trending_info: dict = None) -> dict:
+        """
+        Tool tự động viết kịch bản bằng cách giả lập (mock) dữ liệu dựa trên đầu vào.
+        Không gọi LLM, tự động sinh text chuẩn theo Persona và Insight Gap.
+        """
+        # 1. Bóc tách dữ liệu đầu vào
+        location = activity_item.get("name", "Địa điểm bí ẩn")
+        fact = activity_item.get("fact", "Một sự thật thú vị chưa được tiết lộ.")
+        insight_gap = activity_item.get("insight_gap", "Góc tiếp cận độc lạ chưa ai làm.")
+        
+        creator_name = creator_persona.get("name", "Creator X")
+        tone = creator_persona.get("tone_of_voice", "Hài hước, châm biếm")
+        catchphrases = creator_persona.get("catchphrases", ["Hết cứu", "Ủa alo?", "Thực tế là..."])
+        
+        # Lấy các câu cửa miệng để chèn vào kịch bản cho thật
+        p1 = catchphrases[0] if len(catchphrases) > 0 else "Thực tế là..."
+        p2 = catchphrases[1] if len(catchphrases) > 1 else "Hết cứu!"
+        p3 = catchphrases[2] if len(catchphrases) > 2 else "Ủa alo?"
+
+        # 2. Giả lập định dạng Audio và Video nếu không có truyền vào
+        audio = trending_info.get("audio", "Nhạc nền lôi cuốn đang viral") if trending_info else "Nhạc nền xu hướng TikTok"
+        v_format = trending_info.get("format", "POV Shorts") if trending_info else "POV Clip ngắn"
+
+        # 3. Tự động tạo Tiêu đề giả lập (Hook Titles) theo style giật gân
+        title_suggestions = [
+            f"Đừng đi {location} nếu chưa biết sự thật này!",
+            f"Cú lừa mang tên {location}? {p1}...",
+            f"Trải nghiệm {location} theo phong cách... hành xác! ({p2})"
+        ]
+
+        # 4. Tự động "may đo" kịch bản phân cảnh mô phỏng
+        script_scenes = [
+            {
+                "time": "00:00 - 00:05",
+                "visual": f"Cảnh mở màn giật gân: {creator_name} đứng trước mặt camera, biểu cảm hoang mang/châm biếm tại {location}. Text trên màn hình hiện lớn: 'Cú lừa {location}?'",
+                "audio_voiceover": f"[{audio} bật lên dồn dập] Trên mạng review {location} lung linh lắm đúng không? Nhưng {p1}, có những sự thật mà không ai nói cho bạn biết!"
+            },
+            {
+                "time": "00:05 - 00:25",
+                "visual": f"Cắt cảnh (B-roll) quay cận cảnh thực tế khốc liệt: {fact}. {creator_name} quay lén hoặc có hành động tương tác hài hước.",
+                "audio_voiceover": f"Đấy, nhìn xem! {fact}. Người ta đi du lịch là để chữa lành, còn đi kiểu này là để 'chữa lợn lành thành lợn què'. {p2}!"
+            },
+            {
+                "time": "00:25 - 00:45",
+                "visual": f"Quay {creator_name} ngồi trải nghiệm thực tế, mặt 'bất lực' nhưng đưa ra giải pháp/góc nhìn độc lạ.",
+                "audio_voiceover": f"Thay vì làm clip khen đẹp như các idol khác, mình mách bạn cách xử lý này: {insight_gap}. Đi du lịch là phải có cái đầu lạnh!"
+            },
+            {
+                "time": "00:45 - 00:60",
+                "visual": f"{creator_name} cười trừ, giơ tay chào hoặc làm động tác đặc trưng của kênh. Text kêu gọi hành động hiện lên.",
+                "audio_voiceover": f"Tóm lại là {p3}, anh em có dám thử trải nghiệm kiểu hành xác này không? Comment bên dưới cho tôi biết nhé! Nhớ follow {creator_name} đấy."
+            }
+        ]
+
+        # 5. Trả về kết quả cấu trúc dict sạch sẽ
+        return {
+            "status": "success",
+            "metadata": {
+                "creator": creator_name,
+                "tone_applied": tone,
+                "format": v_format,
+                "audio": audio
+            },
+            "title_suggestions": title_suggestions,
+            "script_scenes": script_scenes
+        }
+
+def GetDuration(content_output: dict) -> dict:
+    """
+    Tool phân tích thời lượng kịch bản, tính toán tốc độ nói và tối ưu nhịp độ video.
+    
+    Input: Output (Dictionary) của hàm getContent.
+    Output: Bản phân tích thông số thời lượng và lời khuyên giữ chân khán giả (Mock Data).
+    """
+    # 1. Kiểm tra tính hợp lệ của dữ liệu đầu vào
+    if content_output.get("status") != "success":
+        return {"error": "Dữ liệu đầu vào từ getContent không hợp lệ hoặc thiếu kịch bản."}
+
+    scenes = content_output.get("script_scenes", [])
+    creator_name = content_output.get("metadata", {}).get("creator", "Creator")
+    
+    total_words = 0
+    total_seconds = 0
+
+    # 2. Xử lý thuật toán mô phỏng dựa trên text của kịch bản
+    for scene in scenes:
+        voiceover = scene.get("audio_voiceover", "")
+        # Loại bỏ các ký tự nằm trong ngoặc vuông [Nhạc nền/SFX] để đếm từ thoại chuẩn
+        clean_voiceover = re.sub(r'\[.*?\]', '', voiceover).strip()
+        word_count = len(clean_voiceover.split())
+        total_words += word_count
+
+        # Bóc tách giây từ chuỗi "00:45 - 00:60" -> Lấy số 60 làm tổng giây
+        time_range = scene.get("time", "00:00 - 00:00")
+        try:
+            end_time_str = time_range.split("-")[1].strip()
+            seconds = int(end_time_str.split(":")[1])
+            if seconds > total_seconds:
+                total_seconds = seconds
+        except (IndexError, ValueError):
+            total_seconds = 60 # Fallback mặc định nếu format lỗi
+
+    # 3. Tính toán Tốc độ nói mô phỏng (WPM - Words Per Minute)
+    # Công thức: (Tổng số từ / Tổng số giây) * 60 giây
+    wpm = (total_words / total_seconds) * 60 if total_seconds > 0 else 0
+    
+    if wpm > 150:
+        speaking_pace = "Bắn rap / Dồn dập (Cực kỳ hợp với TikTok Shorts / Reels)"
+    elif wpm < 110:
+        speaking_pace = "Chậm rãi / Thong thả (Hợp với style chữa lành, ASMR)"
+    else:
+        speaking_pace = "Vừa phải / Chuẩn điện ảnh"
+
+    # 4. Phân bổ cấu trúc thời lượng hình học (Retention Structure)
+    hook_sec = 5
+    cta_sec = 15
+    body_sec = total_seconds - (hook_sec + cta_sec)
+
+    duration_breakdown = {
+        "hook_segment": f"{hook_sec}s (Chiếm {round((hook_sec/total_seconds)*100, 1)}% tổng thời lượng) - Giữ chân 3s đầu",
+        "body_segment": f"{body_sec}s (Chiếm {round((body_sec/total_seconds)*100, 1)}% tổng thời lượng) - Truyền tải nội dung",
+        "cta_segment": f"{cta_sec}s (Chiếm {round((cta_sec/total_seconds)*100, 1)}% tổng thời lượng) - Kêu gọi tương tác"
+    }
+
+    # 5. Tự động sinh Khuyến nghị tối ưu (Optimization Tips)
+    optimization_recommendations = [
+        f"Tốc độ nói trung bình đạt {round(wpm)} từ/phút ({speaking_pace}). {creator_name} cần giữ nhịp điệu này để không bị tụt tương tác.",
+        f"Phần 'The Body' kéo dài {body_sec}s, khuyến nghị chèn thêm ít nhất 4-5 source quay B-roll (cận cảnh món ăn/địa điểm) để tránh tạo cảm giác nhàm chán.",
+        "Đoạn kết kêu gọi hành động (CTA) dài 15s có rủi ro bị người dùng lướt qua sớm. Hãy lồng thêm câu hỏi gây tranh cãi ở giây thứ 50 để kích thích comment."
+    ]
+
+    # 6. Trả về kết quả phân tích sạch sẽ
+    return {
+        "status": "success",
+        "video_duration_analysis": {
+            "total_duration": f"{total_seconds} giây",
+            "total_words_to_speak": total_words,
+            "calculated_wpm": round(wpm, 1),
+            "pace_rating": speaking_pace
+        },
+        "structure_breakdown": duration_breakdown,
+        "retention_insights": optimization_recommendations
+    }
+
+
+    def getScene(content_output: dict) -> dict:
+        """
+        Tool chuyển đổi kịch bản chữ thành Bản phân cảnh quay chi tiết (Shot List).
+        Tự động phân tích bối cảnh để gợi ý Góc máy (Shot Type), Chuyển động (Movement) và Đạo cụ.
+        
+        Input: Output (Dictionary) của hàm getContent.
+        Output: Danh sách các cảnh quay chi tiết phục vụ việc bấm máy quay (Mock Data).
+        """
+        # 1. Kiểm tra tính hợp lệ của dữ liệu đầu vào
+        if content_output.get("status") != "success":
+            return {"error": "Dữ liệu đầu vào từ getContent không hợp lệ."}
+
+        script_scenes = content_output.get("script_scenes", [])
+        creator_name = content_output.get("metadata", {}).get("creator", "Creator")
+    
+        shot_list = []
+    
+        # Danh sách các góc máy và chuyển động để map mô phỏng theo thứ tự logic của video ngắn
+        shot_types = ["Extreme Close-up (Đặc tả biểu cảm mặt)", "Medium Shot (Trung cảnh ngang ngực)", "POV (Góc nhìn thứ nhất)", "Wide Shot (Toàn cảnh bối cảnh)"]
+        camera_movements = ["Static (Giữ máy cố định)", "Push-in (Dịch máy vào gần chậm)", "Pan Left/Right (Quét máy sang ngang)", "Handheld (Cầm tay rung lắc tự nhiên)"]
+    
+    # 2. Vòng lặp tự động "chuyển thể" từng phân cảnh chữ thành thông số kỹ thuật quay
+        for idx, scene in enumerate(script_scenes):
+            time_frame = scene.get("time", "00:00")
+            visual_desc = scene.get("visual", "")
+        
+        # Phân bổ góc quay thông minh dựa theo thứ tự phân cảnh (Mở màn thường quay Toàn/Cận, giữa clip quay POV/Trung)
+            shot_type = shot_types[idx % len(shot_types)]
+            movement = camera_movements[idx % len(camera_movements)]
+        
+        # Tạo hướng dẫn quay thực tế dựa trên số cảnh
+            if idx == 0:
+                director_note = "Phải giữ chân người xem trong 3 giây đầu. Mặt Creator phải biểu cảm thật cường điệu hoặc đứng ở vị trí gây tò mò."
+                props = "Điện thoại quay, Mic không dây gắn áo."
+            elif idx == len(script_scenes) - 1:
+                director_note = "Cảnh kết thúc, Creator nhìn thẳng vào ống kính để kêu gọi comment hành động. Text CTA nhảy ra bên cạnh tai."
+                props = "Sản phẩm/Đạo cụ đặc trưng của kênh để tạo độ nhận diện."
+        else:
+            director_note = "Quay B-roll chèn xen kẽ liên tục mỗi 2 giây một góc máy khác để người xem không bị nhàm chán."
+            props = "Chân máy (Tripod) di động hoặc Gimbal cầm tay."
+
+            shot_item = {
+                "scene_number": idx + 1,
+                "time_range": time_frame,
+                "script_context": visual_desc,
+                "cinematography": {
+                    "shot_size": shot_type,
+                    "camera_movement": movement,
+                    "framing_guide": f"Bố cục 1/3, đặt camera ngang tầm mắt của {creator_name}."
+                },
+                "production_details": {
+                    "equipment_needed": props,
+                    "director_note": director_note
+                }
+            }
+            shot_list.append(shot_item)
+
+    # 3. Trả về kết quả Bản phân cảnh quay sạch sẽ
+        return {
+            "status": "success",
+            "storyboard_summary": {
+                "total_shots_to_film": len(shot_list),
+                "estimated_shooting_time": "30 - 45 phút tại hiện trường",
+                "aspect_ratio_target": "9:16 (Dọc - TikTok/Shorts/Reels)"
+        },
+        "detailed_shot_list": shot_list
+        }
+        
     def _execute_tool(self, tool_name: str, args: str) -> str:
         """
         Helper method to execute tools by name.

@@ -6,6 +6,20 @@
 
 ---
 
+> **⚠️ Grader Note — Context on Branch Structure**
+>
+> This report references two branches: `main` and `huys-version`.
+>
+> My partner and I did not coordinate our task split properly and ended up implementing overlapping parts of the agent independently. When we merged, the team decided to keep my partner's implementation as `main` because reverting and re-merging would have cost too much time at that stage.
+>
+> As a result, **`huys-version` is missing some tools that exist on `main`** (e.g. `budget_estimator`, `generate_seo_metadata`) — not because I did not implement them, but because those were added by my partner directly to `main` after the split.
+>
+> Despite the missing tools, **`huys-version` is architecturally more correct**: it enforces strict one-action-per-response, dispatches tools before checking for `Final Answer`, injects format-violation corrections, and fixes two bugs in `getScene` and `GetDuration` that exist on `main`. The live before/after tests in Section III demonstrate this directly — `main` never calls any tool, while `huys-version` calls the full chain correctly.
+>
+> My individual contribution is documented against the commits I authored on `main` (`266e1b8`, `daada54`) plus the additional fixes on `huys-version` (`ddfbad5`).
+
+---
+
 ## I. Technical Contribution (15 Points)
 
 - **Modules Implemented**: `ReActAgent.run()`, `ReActAgent._execute_tool()`, `TOOLS` constant, `ClaudeProvider`, `main.py` CLI, verbose step display, unit tests (`test_agent_run.py`), live integration tests (`test_agent_live.py`)
@@ -170,8 +184,91 @@ On `main`, 3 out of 4 tool-dependent prompts returned fabricated answers without
 
 ## IV. Future Improvements (5 Points)
 
-- **Scalability**: Replace the sequential `while` loop with an async task queue (e.g., `asyncio` + `anyio`). Each tool call becomes a coroutine, allowing multiple independent tool calls within a single reasoning step to run in parallel and reducing total latency for multi-tool queries.
+- **Build a UI to visualize the reasoning chain**: The current agent outputs steps as terminal text, which is hard to follow for someone new to the ReAct concept. Building a proper web UI (e.g., with Streamlit) would render the full Thought → Action → Observation chain as an interactive step-by-step timeline — each cycle displayed as a colored card, with collapsible observations and a sidebar showing which tools have been called. This makes the agent's internal logic *visible and learnable*, not just functional. It is especially useful for teaching: a student can watch the agent "think out loud" in a browser rather than reading raw JSON logs.
 
-- **Safety**: Add a lightweight "Supervisor" LLM pass that inspects each `Action` before execution — checking that the tool name is valid, arguments are well-formed, and the call is consistent with the user's original intent. This catches prompt-injection attempts (e.g., a crafted `insight_gap` field that smuggles a new `Action:`) and also prevents the hallucination pattern seen in live tests — a supervisor can detect when the model writes its own Observation and reject the response before the tool dispatcher is reached.
+  *Example — Streamlit app with `run_steps()` generator:*
+  ```python
+  # app.py
+  import streamlit as st
+  from src.agent.agent import ReActAgent, TOOLS
+  from src.core.claude_provider import ClaudeProvider
 
-- **Performance**: With more than ~10 tools, grepping the full `TOOLS` list into every system prompt is wasteful and degrades instruction-following. Replace it with a vector DB (e.g., ChromaDB) that retrieves the top-k most relevant tool descriptions at query time, keeping the system prompt short and focused regardless of how many tools are registered.
+  st.title("ReAct Agent – Live Reasoning Viewer")
+  user_input = st.text_input("Ask the agent:")
+
+  if st.button("Run") and user_input:
+      agent = ReActAgent(llm=ClaudeProvider(), tools=TOOLS, max_steps=8)
+      for step in agent.run_steps(user_input):   # run_steps() yields one dict per cycle
+          with st.expander(f"Step {step['index']} — {step['tool'] or 'Final Answer'}", expanded=True):
+              st.info(f"💭 **Thought:** {step['thought']}")
+              if step['tool']:
+                  st.warning(f"⚡ **Action:** `{step['tool']}({step['args']})`")
+                  st.success(f"👁 **Observation:** {step['observation']}")
+              else:
+                  st.success(f"✅ **Final Answer:** {step['answer']}")
+  ```
+  *Run with:* `streamlit run app.py`
+
+- **Step-back on tool error**: Currently, if a tool returns an error the agent just appends it to the prompt and hopes the model self-corrects. A smarter approach is an automatic retry policy — on `Error:` observation, re-inject a structured correction with a retry counter capped at 2.
+
+  *Example:*
+  ```python
+  if observation.startswith("Error:") and retries < 2:
+      current_prompt += (
+          f"\n[SYSTEM] {tool_name} failed: {observation}. "
+          f"Fix your arguments and call it again. Attempt {retries+1}/2."
+      )
+      retries += 1
+      continue   # skip steps += 1, retry same tool
+  retries = 0
+  ```
+
+- **Short-term conversation memory**: Each call to `agent.run()` starts fresh — there is no memory of previous turns. Adding a sliding-window history would let users ask follow-up questions like *"now write the shot list for that script"* without re-running all tools from scratch.
+
+  *Example:*
+  ```python
+  MAX_HISTORY = 6   # keep last 3 turns (user + agent each)
+
+  def run(self, user_input: str) -> str:
+      self.history.append(f"User: {user_input}")
+      context = "\n".join(self.history[-MAX_HISTORY:]) + "\n" + user_input
+      answer = self._run_loop(context)
+      self.history.append(f"Agent: {answer}")
+      return answer
+  ```
+
+- **Schema validation before dispatch**: Before `_execute_tool()` calls the real function, validate the parsed arguments against a lightweight schema defined in the `TOOLS` constant. This catches malformed calls at the boundary before they hit a confusing Python exception.
+
+  *Example:*
+  ```python
+  # In TOOLS definition:
+  {"name": "getActivity", "required": ["city", "categories"], ...}
+
+  # In _execute_tool():
+  required = {t["name"]: t.get("required", []) for t in self.tools}
+  parts = [a.strip() for a in args.split(",")]
+  missing = required[tool_name][len(parts):]   # fields not covered by positional args
+  if missing:
+      return f"Error: {tool_name} missing required args: {missing}. Got: {args!r}"
+  ```
+
+- **Support local models (Ollama) for offline practice**: Replacing the cloud provider with a locally-running model (e.g., `llama3`, `mistral` via Ollama) removes API costs and rate limits entirely — making it practical to run hundreds of test iterations while learning. Smaller models also expose ReAct's failure modes more clearly (they hallucinate Observations more aggressively), which is valuable for understanding *why* the prompt engineering and format enforcement matters.
+
+  *Example — drop-in `OllamaProvider`:*
+  ```python
+  import requests
+
+  class OllamaProvider(LLMProvider):
+      def __init__(self, model_name: str = "llama3"):
+          super().__init__(model_name, api_key=None)
+
+      def generate(self, prompt: str, system_prompt: str = None) -> dict:
+          payload = {
+              "model": self.model_name,
+              "prompt": f"{system_prompt}\n\n{prompt}" if system_prompt else prompt,
+              "stream": False,
+          }
+          r = requests.post("http://localhost:11434/api/generate", json=payload)
+          return {"content": r.json()["response"], "provider": "ollama"}
+  ```
+  *Usage:* `! ollama pull llama3` then set `DEFAULT_PROVIDER=ollama` in `.env`.

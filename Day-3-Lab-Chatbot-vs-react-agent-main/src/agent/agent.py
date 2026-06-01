@@ -450,7 +450,8 @@ Final Answer: <your final response to the user>"""
 
     @staticmethod
     def getScene(content_output: dict) -> dict:
-        if content_output.get("status") != "success":
+        # Validate input
+        if not isinstance(content_output, dict) or content_output.get("status") != "success":
             return {"error": "Dữ liệu đầu vào từ getContent không hợp lệ."}
 
         script_scenes = content_output.get("script_scenes", [])
@@ -458,6 +459,7 @@ Final Answer: <your final response to the user>"""
 
         shot_list = []
 
+        # Templates for shot sizes and camera movements
         shot_types = [
             "Extreme Close-up (Đặc tả biểu cảm mặt)",
             "Medium Shot (Trung cảnh ngang ngực)",
@@ -472,30 +474,34 @@ Final Answer: <your final response to the user>"""
         ]
 
         for idx, scene in enumerate(script_scenes):
-            time_frame = scene.get("time", "00:00")
+            time_frame = scene.get("time", "00:00 - 00:05")
             visual_desc = scene.get("visual", "")
+            voiceover = re.sub(r'\[.*?\]', '', scene.get("audio_voiceover", "")).strip()
 
             shot_type = shot_types[idx % len(shot_types)]
             movement = camera_movements[idx % len(camera_movements)]
 
             if idx == 0:
-                director_note = "Phải giữ chân người xem trong 3 giây đầu. Mặt Creator phải biểu cảm thật cường điệu hoặc đứng ở vị trí gây tò mò."
-                props = "Điện thoại quay, Mic không dây gắn áo."
+                director_note = (
+                    "Hook: Giữ chân người xem trong 3s đầu. Sử dụng biểu cảm cường điệu, text lớn và jump-cut để tăng retention."
+                )
+                props = ["Điện thoại quay", "Mic không dây"]
             elif idx == len(script_scenes) - 1:
-                director_note = "Cảnh kết thúc, Creator nhìn thẳng vào ống kính để kêu gọi comment hành động. Text CTA nhảy ra bên cạnh tai."
-                props = "Sản phẩm/Đạo cụ đặc trưng của kênh để tạo độ nhận diện."
+                director_note = "Kết: Creator nhìn vào camera, CTA rõ ràng, kêu gọi follow/comment."
+                props = ["Đạo cụ nhận diện kênh"]
             else:
-                director_note = "Quay B-roll chèn xen kẽ liên tục mỗi 2 giây một góc máy khác để người xem không bị nhàm chán."
-                props = "Chân máy (Tripod) di động hoặc Gimbal cầm tay."
+                director_note = "B-roll: xen kẽ close-up và wide, chuyển cảnh mỗi 2-3s để giữ nhịp." 
+                props = ["Tripod/Gimbal", "Phụ kiện trang trí"]
 
             shot_item = {
                 "scene_number": idx + 1,
                 "time_range": time_frame,
                 "script_context": visual_desc,
+                "example_voiceover": voiceover,
                 "cinematography": {
                     "shot_size": shot_type,
                     "camera_movement": movement,
-                    "framing_guide": f"Bố cục 1/3, đặt camera ngang tầm mắt của {creator_name}."
+                    "framing_guide": f"Bố cục 1/3, đặt camera ngang tầm mắt, tránh cắt sát đầu của {creator_name}."
                 },
                 "production_details": {
                     "equipment_needed": props,
@@ -504,23 +510,22 @@ Final Answer: <your final response to the user>"""
             }
             shot_list.append(shot_item)
 
-        return {
-            "status": "success",
-            "storyboard_summary": {
-                "total_shots_to_film": len(shot_list),
-                "estimated_shooting_time": "30 - 45 phút tại hiện trường",
-                "aspect_ratio_target": "9:16 (Dọc - TikTok/Shorts/Reels)"
-            },
-            "detailed_shot_list": shot_list
+        summary = {
+            "total_shots_to_film": len(shot_list),
+            "estimated_shooting_time": f"{max(20, len(shot_list)*5)} - {max(30, len(shot_list)*8)} phút",
+            "aspect_ratio_target": "9:16 (Dọc - TikTok/Shorts/Reels)"
         }
+
+        return {"status": "success", "storyboard_summary": summary, "detailed_shot_list": shot_list}
 
     @staticmethod
     def generate_seo_metadata(content_output: dict, platform: str = "tiktok") -> dict:
-        if content_output.get("status") != "success":
+        # Validate input
+        if not isinstance(content_output, dict) or content_output.get("status") != "success":
             return {"error": "Dữ liệu đầu vào từ getContent không hợp lệ hoặc thiếu kịch bản."}
 
         valid_platforms = ["tiktok", "youtube_shorts", "reels"]
-        platform = platform.lower().strip()
+        platform = (platform or "tiktok").lower().strip()
         if platform not in valid_platforms:
             return {"error": f"Platform không hợp lệ: '{platform}'. Hãy chọn một trong: {', '.join(valid_platforms)}"}
 
@@ -537,97 +542,61 @@ Final Answer: <your final response to the user>"""
             for scene in script_scenes
         )
 
+        # Title selection and truncation
         seo_title = title_suggestions[0] if title_suggestions else f"Khám phá bí mật cùng {creator_name}!"
-
         title_char_limits = {"tiktok": 100, "youtube_shorts": 100, "reels": 125}
         limit = title_char_limits[platform]
         if len(seo_title) > limit:
-            seo_title = seo_title[:limit - 3] + "..."
+            seo_title = seo_title[: limit - 3].rstrip() + "..."
 
-        first_scene_context = script_scenes[0].get("audio_voiceover", "") if script_scenes else ""
-        clean_first_line = re.sub(r'\[.*?\]', '', first_scene_context).strip()
-        hook_preview = clean_first_line[:120] + "..." if len(clean_first_line) > 120 else clean_first_line
+        # Description: use first scene voiceover as hook
+        first_voice = ""
+        if script_scenes:
+            first_voice = re.sub(r'\[.*?\]', '', script_scenes[0].get("audio_voiceover", "")).strip()
+        hook_preview = (first_voice[:120] + "...") if len(first_voice) > 120 else first_voice
 
         desc_templates = {
-            "tiktok": (
-                f"{hook_preview}\n\n"
-                f"👉 Theo dõi {creator_name} để không bỏ lỡ những góc nhìn độc lạ!\n"
-                f"💬 Comment trải nghiệm của bạn bên dưới nhé!"
-            ),
-            "youtube_shorts": (
-                f"{hook_preview}\n\n"
-                f"🔔 Subscribe {creator_name} để xem thêm video hài hước & chân thực!\n"
-                f"📌 Video thuộc series: {video_format}\n"
-                f"👍 Like nếu bạn thấy hữu ích!"
-            ),
-            "reels": (
-                f"{hook_preview}\n\n"
-                f"Save lại để xem khi cần! 🔖\n"
-                f"Tag bạn bè mày vào đây 👇\n"
-                f"Follow {creator_name} để cập nhật thêm!"
-            ),
+            "tiktok": f"{hook_preview}\n\n👉 Theo dõi {creator_name} để không bỏ lỡ những góc nhìn độc lạ!\n💬 Comment trải nghiệm của bạn bên dưới nhé!",
+            "youtube_shorts": f"{hook_preview}\n\n🔔 Subscribe {creator_name} để xem thêm video hài hước & chân thực!\n📌 Video thuộc series: {video_format}\n👍 Like nếu bạn thấy hữu ích!",
+            "reels": f"{hook_preview}\n\nSave lại để xem khi cần! 🔖\nTag bạn bè vào đây 👇\nFollow {creator_name} để cập nhật thêm!",
         }
         description = desc_templates[platform]
 
-        def _sanitize_hashtag(tag: str) -> str:
-            """Strip # prefix, normalize via clean_input (removes diacritics/spaces), re-add #."""
-            raw = tag.lstrip("#")
-            return "#" + clean_input(raw).replace("_", "")
-
+        # Hashtags
         base_hashtags = ["#dulich", "#reviewdulich", "#khampha", "#vietnam", "#travel"]
-
-        # Keys normalized so matching works regardless of input diacritics
         tone_hashtag_map = {
-            "hai huoc": ["#haivl", "#chiembi", "#hamhui"],
-            "cham biem": ["#chiembi", "#noisuthat", "#gocnhinkhac"],
-            "chan thuc": ["#reallife", "#noisuthat", "#khongfilter"],
+            "hài hước": ["#haivl", "#chiembi"],
+            "châm biếm": ["#chiembi", "#noisuthat"],
+            "chân thực": ["#reallife", "#noisuthat"],
         }
-        # Normalize the tone value before lookup
-        tone_normalized = clean_input(tone).replace("_", " ")
-        tone_key = next((k for k in tone_hashtag_map if k in tone_normalized), None)
-        tone_hashtags = tone_hashtag_map.get(tone_key, ["#creator", "#content"])
+        tone_key = next((k for k in tone_hashtag_map if k in tone.lower()), None)
+        tone_hashtags = tone_hashtag_map.get(tone_key, ["#creator"])
 
         platform_hashtag_map = {
-            "tiktok": ["#tiktokdulich", "#tiktokvietnam", "#foryou", "#fyp", "#xuhuong"],
-            "youtube_shorts": ["#shorts", "#youtubeshorts", "#shortvideo"],
-            "reels": ["#reels", "#reelsviral", "#instareels"],
+            "tiktok": ["#tiktokdulich", "#fyp", "#xuhuong"],
+            "youtube_shorts": ["#shorts", "#youtubeshorts"],
+            "reels": ["#reels", "#reelsviral"],
         }
-        platform_hashtags = platform_hashtag_map[platform]
+        platform_hashtags = platform_hashtag_map.get(platform, [])
 
-        # Sanitize every hashtag: remove diacritics, remove spaces, lowercase
-        all_hashtags = list(dict.fromkeys(
-            _sanitize_hashtag(h)
-            for h in base_hashtags + tone_hashtags + platform_hashtags
-        ))
-
+        all_hashtags = list(dict.fromkeys(base_hashtags + tone_hashtags + platform_hashtags))
         hashtag_limits = {"tiktok": 10, "youtube_shorts": 8, "reels": 15}
-        final_hashtags = all_hashtags[:hashtag_limits[platform]]
+        final_hashtags = all_hashtags[: hashtag_limits[platform]]
 
-        stopwords = {"là", "và", "của", "có", "một", "để", "với", "cho", "bạn", "này",
-                     "mình", "cái", "rồi", "thì", "nhé", "đi", "ra", "lên", "vào", "đây"}
-        raw_words = re.findall(r'\b\w{4,}\b', all_voiceover.lower())
+        # Keywords extraction
+        stopwords = {"là", "và", "của", "có", "một", "để", "với", "cho", "bạn", "này", "mình", "cái", "rồi", "thì", "nhé", "đi", "ra", "lên", "vào", "đây"}
+        raw_words = re.findall(r"\b[\wđ]{4,}\b", all_voiceover.lower())
         word_freq: Dict[str, int] = {}
         for w in raw_words:
-            if w not in stopwords:
-                word_freq[w] = word_freq.get(w, 0) + 1
+            if w in stopwords:
+                continue
+            word_freq[w] = word_freq.get(w, 0) + 1
         top_keywords = sorted(word_freq, key=lambda x: word_freq[x], reverse=True)[:8]
 
         posting_tips_map = {
-            "tiktok": [
-                "Đăng vào khung giờ vàng: 11h-13h trưa hoặc 19h-21h tối (giờ Việt Nam).",
-                "Dùng âm thanh trending trong vòng 48h để tăng đề xuất từ thuật toán.",
-                "Reply comment trong 30 phút đầu sau khi đăng để boost tương tác.",
-            ],
-            "youtube_shorts": [
-                "Thêm chapter/timestamp trong description dù video ngắn — giúp tăng SEO.",
-                "Đặt thumbnail giật gân với biểu cảm cường điệu của Creator.",
-                "Đăng vào thứ 3, thứ 5 hoặc thứ 7 trong khung 17h-20h.",
-            ],
-            "reels": [
-                "Chia sẻ Reels lên Story ngay sau khi đăng để tăng reach ban đầu.",
-                "Dùng tối đa 3-5 hashtag lớn + 5-10 hashtag ngách thay vì toàn hashtag triệu view.",
-                "Caption nên kết thúc bằng câu hỏi mở để kích thích comment.",
-            ],
+            "tiktok": ["Đăng vào khung giờ vàng: 11h-13h hoặc 19h-21h (VN).", "Dùng audio trending trong 48h đầu để tăng đề xuất.", "Reply comment sớm để kích hoạt thuật toán."],
+            "youtube_shorts": ["Thêm mô tả ngắn + hashtag chính trong 100 ký tự đầu.", "Dùng thumbnail biểu cảm và caption kêu gọi hành động."],
+            "reels": ["Chia sẻ lên Story ngay sau khi đăng.", "Kết thúc caption bằng câu hỏi để kích thích bình luận."]
         }
 
         return {
@@ -638,7 +607,7 @@ Final Answer: <your final response to the user>"""
             "hashtags": final_hashtags,
             "hashtag_string": " ".join(final_hashtags),
             "top_keywords": top_keywords,
-            "posting_tips": posting_tips_map[platform],
+            "posting_tips": posting_tips_map.get(platform, [])
         }
 
     # ─────────────────────────────────────────────

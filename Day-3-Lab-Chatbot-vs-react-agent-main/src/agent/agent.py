@@ -4,66 +4,6 @@ from typing import List, Dict, Any, Optional
 from src.core.llm_provider import LLMProvider
 from src.telemetry.logger import logger
 
-class ReActAgent:
-    """
-    SKELETON: A ReAct-style Agent that follows the Thought-Action-Observation loop.
-    Students should implement the core loop logic and tool execution.
-    """
-    
-    def __init__(self, llm: LLMProvider, tools: List[Dict[str, Any]], max_steps: int = 5):
-        self.llm = llm
-        self.tools = tools
-        self.max_steps = max_steps
-        self.history = []
-
-    def get_system_prompt(self) -> str:
-        """
-        TODO: Implement the system prompt that instructs the agent to follow ReAct.
-        Should include:
-        1.  Available tools and their descriptions.
-        2.  Format instructions: Thought, Action, Observation.
-        """
-        tool_descriptions = "\n".join([f"- {t['name']}: {t['description']}" for t in self.tools])
-        return f"""
-        You are an intelligent assistant. You have access to the following tools:
-        {tool_descriptions}
-
-        Use the following format:
-        Thought: your line of reasoning.
-        Action: tool_name(arguments)
-        Observation: result of the tool call.
-        ... (repeat Thought/Action/Observation if needed)
-        Final Answer: your final response.
-        """
-
-    def run(self, user_input: str) -> str:
-        """
-        TODO: Implement the ReAct loop logic.
-        1. Generate Thought + Action.
-        2. Parse Action and execute Tool.
-        3. Append Observation to prompt and repeat until Final Answer.
-        """
-        logger.log_event("AGENT_START", {"input": user_input, "model": self.llm.model_name})
-        
-        current_prompt = user_input
-        steps = 0
-
-        while steps < self.max_steps:
-            # TODO: Generate LLM response
-            # result = self.llm.generate(current_prompt, system_prompt=self.get_system_prompt())
-            
-            # TODO: Parse Thought/Action from result
-            
-            # TODO: If Action found -> Call tool -> Append Observation
-            
-            # TODO: If Final Answer found -> Break loop
-            
-            steps += 1
-            
-        logger.log_event("AGENT_END", {"steps": steps})
-        return "Not implemented. Fill in the TODOs!"
-import re
-
 # 🗄️ DATABASE: Được thiết kế chi tiết với Fact và Insight để Agent dễ "bắt chữ" lên kịch bản
 ACTIVITIES_DB = {
     "ha_noi": {
@@ -137,7 +77,6 @@ ACTIVITIES_DB = {
 def clean_input(text: str) -> str:
     """Chuẩn hóa tiếng Việt không dấu và viết liền để dễ map key"""
     text = text.lower().strip()
-    # Chuyển đổi một số từ thông dụng
     text = re.sub(r'[àáạảãâầấậẩẫăằắặẳẵ]', 'a', text)
     text = re.sub(r'[èéẹẻẽêềếệểễ]', 'e', text)
     text = re.sub(r'[ìíịỉĩ]', 'i', text)
@@ -149,32 +88,92 @@ def clean_input(text: str) -> str:
     text = text.replace(" ", "_")
     return text
 
-def getActivity(city: str, categories: str) -> dict:
+class ReActAgent:
     """
-    Tool gợi ý địa điểm, kèm sự thật (fact) và khoảng trống nội dung (insight_gap)
-    
-    Parameters:
-    - city (str): 'Ha Noi' hoặc 'Sai Gon'
-    - categories (str): 'am_thuc', 'check_in', 'hidden_gem'
+    SKELETON: A ReAct-style Agent that follows the Thought-Action-Observation loop.
+    Students should implement the core loop logic and tool execution.
     """
-    city_key = clean_input(city)
-    cate_key = clean_input(categories)
     
-    # Kiểm tra thành phố
-    if city_key not in ACTIVITIES_DB:
-        return {"error": f"Hiện tại tool chỉ hỗ trợ dữ liệu cho 'ha_no' hoặc 'sai_gon'. Bạn nhập: '{city}'"}
+    def __init__(self, llm: LLMProvider, tools: List[Dict[str, Any]], max_steps: int = 5):
+        self.llm = llm
+        self.tools = tools
+        self.max_steps = max_steps
+        self.history = []
+
+    def get_system_prompt(self) -> str:
+        """
+        TODO: Implement the system prompt that instructs the agent to follow ReAct.
+        Should include:
+        1.  Available tools and their descriptions.
+        2.  Format instructions: Thought, Action, Observation.
+        """
+        tool_descriptions = "\n".join([f"- {t['name']}: {t['description']}" for t in self.tools])
+        return f"""
+        You are an intelligent assistant. You have access to the following tools:
+        {tool_descriptions}
+
+        Use the following format:
+        Thought: your line of reasoning.
+        Action: tool_name(arguments)
+        Observation: result of the tool call.
+        ... (repeat Thought/Action/Observation if needed)
+        Final Answer: your final response.
+        """
+
+    def run(self, user_input: str) -> str:
+        """
+        TODO: Implement the ReAct loop logic.
+        1. Generate Thought + Action.
+        2. Parse Action and execute Tool.
+        3. Append Observation to prompt and repeat until Final Answer.
+        """
+        logger.log_event("AGENT_START", {"input": user_input, "model": self.llm.model_name})
         
-    # Kiểm tra category
-    if cate_key not in ACTIVITIES_DB[city_key]:
-        valid_cates = ", ".join(ACTIVITIES_DB[city_key].keys())
-        return {"error": f"Không tìm thấy danh mục '{categories}'. Hãy chọn một trong các danh mục: {valid_cates}"}
+        current_prompt = user_input
+        steps = 0
+
+        while steps < self.max_steps:
+            # TODO: Generate LLM response
+            # result = self.llm.generate(current_prompt, system_prompt=self.get_system_prompt())
+            
+            # TODO: Parse Thought/Action from result
+            
+            # TODO: If Action found -> Call tool -> Append Observation
+            
+            # TODO: If Final Answer found -> Break loop
+            
+            steps += 1
+            
+        logger.log_event("AGENT_END", {"steps": steps})
+        return "Not implemented. Fill in the TODOs!"
+
+    @staticmethod
+    def getActivity(city: str, categories: str) -> dict:
+        """
+        Tool gợi ý địa điểm, kèm sự thật (fact) và khoảng trống nội dung (insight_gap)
         
-    return {
-        "status": "success",
-        "city": city,
-        "category": categories,
-        "data": ACTIVITIES_DB[city_key][cate_key]
-    }
+        Parameters:
+        - city (str): 'Ha Noi' hoặc 'Sai Gon'
+        - categories (str): 'am_thuc', 'check_in', 'hidden_gem'
+        """
+        city_key = clean_input(city)
+        cate_key = clean_input(categories)
+        
+        # Kiểm tra thành phố
+        if city_key not in ACTIVITIES_DB:
+            return {"error": f"Hiện tại tool chỉ hỗ trợ dữ liệu cho 'ha_no' hoặc 'sai_gon'. Bạn nhập: '{city}'"}
+            
+        # Kiểm tra category
+        if cate_key not in ACTIVITIES_DB[city_key]:
+            valid_cates = ", ".join(ACTIVITIES_DB[city_key].keys())
+            return {"error": f"Không tìm thấy danh mục '{categories}'. Hãy chọn một trong các danh mục: {valid_cates}"}
+            
+        return {
+            "status": "success",
+            "city": city,
+            "category": categories,
+            "data": ACTIVITIES_DB[city_key][cate_key]
+        }
 
     def getContent(activity_item: dict, creator_persona: dict, trending_info: dict = None) -> dict:
         """
@@ -243,82 +242,82 @@ def getActivity(city: str, categories: str) -> dict:
             "script_scenes": script_scenes
         }
 
-def GetDuration(content_output: dict) -> dict:
-    """
-    Tool phân tích thời lượng kịch bản, tính toán tốc độ nói và tối ưu nhịp độ video.
-    
-    Input: Output (Dictionary) của hàm getContent.
-    Output: Bản phân tích thông số thời lượng và lời khuyên giữ chân khán giả (Mock Data).
-    """
-    # 1. Kiểm tra tính hợp lệ của dữ liệu đầu vào
-    if content_output.get("status") != "success":
-        return {"error": "Dữ liệu đầu vào từ getContent không hợp lệ hoặc thiếu kịch bản."}
+    def GetDuration(content_output: dict) -> dict:
+        """
+        Tool phân tích thời lượng kịch bản, tính toán tốc độ nói và tối ưu nhịp độ video.
+        
+        Input: Output (Dictionary) của hàm getContent.
+        Output: Bản phân tích thông số thời lượng và lời khuyên giữ chân khán giả (Mock Data).
+        """
+        # 1. Kiểm tra tính hợp lệ của dữ liệu đầu vào
+        if content_output.get("status") != "success":
+            return {"error": "Dữ liệu đầu vào từ getContent không hợp lệ hoặc thiếu kịch bản."}
 
-    scenes = content_output.get("script_scenes", [])
-    creator_name = content_output.get("metadata", {}).get("creator", "Creator")
-    
-    total_words = 0
-    total_seconds = 0
+        scenes = content_output.get("script_scenes", [])
+        creator_name = content_output.get("metadata", {}).get("creator", "Creator")
+        
+        total_words = 0
+        total_seconds = 0
 
-    # 2. Xử lý thuật toán mô phỏng dựa trên text của kịch bản
-    for scene in scenes:
-        voiceover = scene.get("audio_voiceover", "")
-        # Loại bỏ các ký tự nằm trong ngoặc vuông [Nhạc nền/SFX] để đếm từ thoại chuẩn
-        clean_voiceover = re.sub(r'\[.*?\]', '', voiceover).strip()
-        word_count = len(clean_voiceover.split())
-        total_words += word_count
+        # 2. Xử lý thuật toán mô phỏng dựa trên text của kịch bản
+        for scene in scenes:
+            voiceover = scene.get("audio_voiceover", "")
+            # Loại bỏ các ký tự nằm trong ngoặc vuông [Nhạc nền/SFX] để đếm từ thoại chuẩn
+            clean_voiceover = re.sub(r'\[.*?\]', '', voiceover).strip()
+            word_count = len(clean_voiceover.split())
+            total_words += word_count
 
-        # Bóc tách giây từ chuỗi "00:45 - 00:60" -> Lấy số 60 làm tổng giây
-        time_range = scene.get("time", "00:00 - 00:00")
-        try:
-            end_time_str = time_range.split("-")[1].strip()
-            seconds = int(end_time_str.split(":")[1])
-            if seconds > total_seconds:
-                total_seconds = seconds
-        except (IndexError, ValueError):
-            total_seconds = 60 # Fallback mặc định nếu format lỗi
+            # Bóc tách giây từ chuỗi "00:45 - 00:60" -> Lấy số 60 làm tổng giây
+            time_range = scene.get("time", "00:00 - 00:00")
+            try:
+                end_time_str = time_range.split("-")[1].strip()
+                seconds = int(end_time_str.split(":")[1])
+                if seconds > total_seconds:
+                    total_seconds = seconds
+            except (IndexError, ValueError):
+                total_seconds = 60 # Fallback mặc định nếu format lỗi
 
-    # 3. Tính toán Tốc độ nói mô phỏng (WPM - Words Per Minute)
-    # Công thức: (Tổng số từ / Tổng số giây) * 60 giây
-    wpm = (total_words / total_seconds) * 60 if total_seconds > 0 else 0
-    
-    if wpm > 150:
-        speaking_pace = "Bắn rap / Dồn dập (Cực kỳ hợp với TikTok Shorts / Reels)"
-    elif wpm < 110:
-        speaking_pace = "Chậm rãi / Thong thả (Hợp với style chữa lành, ASMR)"
-    else:
-        speaking_pace = "Vừa phải / Chuẩn điện ảnh"
+        # 3. Tính toán Tốc độ nói mô phỏng (WPM - Words Per Minute)
+        # Công thức: (Tổng số từ / Tổng số giây) * 60 giây
+        wpm = (total_words / total_seconds) * 60 if total_seconds > 0 else 0
+        
+        if wpm > 150:
+            speaking_pace = "Bắn rap / Dồn dập (Cực kỳ hợp với TikTok Shorts / Reels)"
+        elif wpm < 110:
+            speaking_pace = "Chậm rãi / Thong thả (Hợp với style chữa lành, ASMR)"
+        else:
+            speaking_pace = "Vừa phải / Chuẩn điện ảnh"
 
-    # 4. Phân bổ cấu trúc thời lượng hình học (Retention Structure)
-    hook_sec = 5
-    cta_sec = 15
-    body_sec = total_seconds - (hook_sec + cta_sec)
+        # 4. Phân bổ cấu trúc thời lượng hình học (Retention Structure)
+        hook_sec = 5
+        cta_sec = 15
+        body_sec = total_seconds - (hook_sec + cta_sec)
 
-    duration_breakdown = {
-        "hook_segment": f"{hook_sec}s (Chiếm {round((hook_sec/total_seconds)*100, 1)}% tổng thời lượng) - Giữ chân 3s đầu",
-        "body_segment": f"{body_sec}s (Chiếm {round((body_sec/total_seconds)*100, 1)}% tổng thời lượng) - Truyền tải nội dung",
-        "cta_segment": f"{cta_sec}s (Chiếm {round((cta_sec/total_seconds)*100, 1)}% tổng thời lượng) - Kêu gọi tương tác"
-    }
+        duration_breakdown = {
+            "hook_segment": f"{hook_sec}s (Chiếm {round((hook_sec/total_seconds)*100, 1)}% tổng thời lượng) - Giữ chân 3s đầu",
+            "body_segment": f"{body_sec}s (Chiếm {round((body_sec/total_seconds)*100, 1)}% tổng thời lượng) - Truyền tải nội dung",
+            "cta_segment": f"{cta_sec}s (Chiếm {round((cta_sec/total_seconds)*100, 1)}% tổng thời lượng) - Kêu gọi tương tác"
+        }
 
-    # 5. Tự động sinh Khuyến nghị tối ưu (Optimization Tips)
-    optimization_recommendations = [
-        f"Tốc độ nói trung bình đạt {round(wpm)} từ/phút ({speaking_pace}). {creator_name} cần giữ nhịp điệu này để không bị tụt tương tác.",
-        f"Phần 'The Body' kéo dài {body_sec}s, khuyến nghị chèn thêm ít nhất 4-5 source quay B-roll (cận cảnh món ăn/địa điểm) để tránh tạo cảm giác nhàm chán.",
-        "Đoạn kết kêu gọi hành động (CTA) dài 15s có rủi ro bị người dùng lướt qua sớm. Hãy lồng thêm câu hỏi gây tranh cãi ở giây thứ 50 để kích thích comment."
-    ]
+        # 5. Tự động sinh Khuyến nghị tối ưu (Optimization Tips)
+        optimization_recommendations = [
+            f"Tốc độ nói trung bình đạt {round(wpm)} từ/phút ({speaking_pace}). {creator_name} cần giữ nhịp điệu này để không bị tụt tương tác.",
+            f"Phần 'The Body' kéo dài {body_sec}s, khuyến nghị chèn thêm ít nhất 4-5 source quay B-roll (cận cảnh món ăn/địa điểm) để tránh tạo cảm giác nhàm chán.",
+            "Đoạn kết kêu gọi hành động (CTA) dài 15s có rủi ro bị người dùng lướt qua sớm. Hãy lồng thêm câu hỏi gây tranh cãi ở giây thứ 50 để kích thích comment."
+        ]
 
-    # 6. Trả về kết quả phân tích sạch sẽ
-    return {
-        "status": "success",
-        "video_duration_analysis": {
-            "total_duration": f"{total_seconds} giây",
-            "total_words_to_speak": total_words,
-            "calculated_wpm": round(wpm, 1),
-            "pace_rating": speaking_pace
-        },
-        "structure_breakdown": duration_breakdown,
-        "retention_insights": optimization_recommendations
-    }
+        # 6. Trả về kết quả phân tích sạch sẽ
+        return {
+            "status": "success",
+            "video_duration_analysis": {
+                "total_duration": f"{total_seconds} giây",
+                "total_words_to_speak": total_words,
+                "calculated_wpm": round(wpm, 1),
+                "pace_rating": speaking_pace
+            },
+            "structure_breakdown": duration_breakdown,
+            "retention_insights": optimization_recommendations
+        }
 
 
     def getScene(content_output: dict) -> dict:

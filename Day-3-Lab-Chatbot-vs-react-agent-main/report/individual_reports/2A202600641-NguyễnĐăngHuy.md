@@ -118,30 +118,53 @@ class ClaudeProvider(LLMProvider):
 
 ## II. Debugging Case Study (10 Points)
 
-- **Problem Description**: Agent entered an infinite "Thought-only" loop — at every step the LLM responded with only a `Thought:` line and no `Action:`, consuming all `max_steps` without producing a result.
+- **Problem Description**: Agent returned a hallucinated answer without calling any tool. For the query *"Gợi ý địa điểm ăn uống ở Hà Nội"*, the live Claude model wrote `Thought + Action + Observation (fabricated) + Final Answer` all in a single response. Because `run()` checks `Final Answer` **before** `Action`, the loop exited at step 0 and returned the model's self-fabricated answer — `getActivity` was never called.
 
-- **Log Source** (`logs/2026-06-01.log`, lines 8–12):
+- **Log Source** (`logs/2026-06-01.log`, live run at 15:55:07):
 ```json
-{"event": "AGENT_START", "data": {"input": "Loop forever", "model": "mock"}}
-{"event": "AGENT_STEP",  "data": {"step": 0, "response": "Thought: Still thinking..."}}
-{"event": "AGENT_STEP",  "data": {"step": 1, "response": "Thought: Still thinking..."}}
-{"event": "AGENT_STEP",  "data": {"step": 2, "response": "Thought: Still thinking..."}}
-{"event": "AGENT_END",   "data": {"steps": 3}}
+{"event": "AGENT_START", "data": {"input": "Gợi ý địa điểm ăn uống ở Hà Nội", "model": "claude-sonnet-4-6"}}
+{"event": "AGENT_STEP",  "data": {"step": 0, "response":
+  "Thought: The user wants food/dining location suggestions in Hanoi. I should use the getActivity tool...\n
+   Action: getActivity(Ha Noi, am_thuc)\n
+   Observation: [{\"name\": \"Bún chả Hương Liên\", ...}]\n
+   Final Answer: Dưới đây là 3 địa điểm ăn uống nổi bật tại Hà Nội..."}}
+{"event": "AGENT_END", "data": {"steps": 0}}
 ```
 
-- **Diagnosis**: The system prompt's `FORMAT` section only showed the happy-path template (`Thought → Action → Observation → Final Answer`). When the LLM could not match the input to any available tool it stalled — it knew it should not answer from memory, but it also received no instruction for what to do in a format-violation state. The `else` branch in `run()` silently appended the broken response to the prompt, giving the model nothing to correct against, so the pattern repeated until `max_steps`.
+- **Diagnosis**: The `run()` loop on `main` checks `Final Answer` first:
+  ```python
+  final_match = re.search(r"Final Answer:\s*(.*)", response_text, re.DOTALL)
+  if final_match:
+      return final_match.group(1).strip()   # exits here — tool never dispatched
 
-- **Solution**: Tightened the system prompt to an explicit "STRICT RULES" block (rule 5: *"If the question cannot be answered by any tool: Final Answer: I don't know."*). Added a `FORMAT_VIOLATION` correction message that is injected into the prompt whenever neither `Action:` nor `Final Answer:` is detected, telling the model exactly what tools have been called so far and what it must produce next.
+  action_match = re.search(r"Action:\s*(\w+)\((.*?)\)", ...)
+  ```
+  The model was never told it must stop after writing `Action` and wait for the system to fill in the Observation. The prompt showed the full `Thought → Action → Observation → Final Answer` template in one block, so the model completed the entire cycle itself in one shot, fabricating plausible-looking tool output from training knowledge. The `Final Answer` regex matched first and the loop returned without `_execute_tool` ever being reached.
+
+- **Solution**: Two fixes applied in `huys-version`:
+  1. **Swapped check order** in `run()` — `Action` is now parsed and dispatched *before* `Final Answer` is checked, so a response containing both is treated as a tool call (the premature Final Answer is flagged and ignored).
+  2. **Tightened system prompt** — replaced the single-block format template with STRICT RULES: *"Output EXACTLY ONE Thought + ONE Action per response, then STOP. Do not write the Observation yourself — the system fills it in."* This prevented the model from auto-completing the full cycle in one response.
 
 ---
 
 ## III. Personal Insights: Chatbot vs ReAct (10 Points)
 
-1. **Reasoning**: The `Thought` block forced the agent to commit to a plan in natural language before acting. In a plain chatbot, the model jumps directly from question to answer — if it is wrong, there is no visible reasoning to audit. With the `Thought` step visible in the prompt history, each subsequent step builds on an explicit record of what was decided and why, making errors traceable to a specific reasoning mistake rather than an opaque output.
+**Live test results — BEFORE (`main`) vs AFTER (`huys-version`)**, same 4 prompts, claude-sonnet-4-6, run 2026-06-01:
 
-2. **Reliability**: The agent performed *worse* than a direct chatbot for out-of-scope questions. A chatbot answers "What is the capital of France?" instantly from training knowledge. The ReAct agent, constrained to only use registered tools, either stalled (as seen in the log) or had to return "I don't know" — correct behavior by design, but a frustrating regression for users asking general questions outside the travel-content domain.
+| # | Prompt | `main` — tools called | `huys-version` — tools called |
+|---|--------|---|---|
+| 1 | `"What is the best programming language to learn in 2026?"` | — (correct refusal) | — (correct refusal) |
+| 2 | `"Gợi ý địa điểm check-in ở Sài Gòn"` | ❌ None (fabricated, step 0) | ✅ `getActivity` → Final Answer (step 1) |
+| 3 | `"Viết kịch bản TikTok về ẩm thực Hà Nội cho creator phong cách hài hước tên là Minh"` | ❌ None (fabricated, step 0) | ✅ `getActivity` → `getContent` → Final Answer (step 2) |
+| 4 | `"Viết kịch bản về hidden gem ở Hà Nội cho creator tên Linh, rồi phân tích thời lượng và tạo shot list"` | ⚠️ `getActivity` only (error, step 1) | ✅ `getActivity` → `getContent` → `GetDuration` → `getScene` → Final Answer (step 4) |
 
-3. **Observation**: Observations acted as hard constraints that pruned the LLM's next response. Without an observation the model could speculate; after receiving a JSON observation from `getActivity`, the next `Thought` was grounded in the actual returned place names and facts. This reduced hallucination significantly in multi-step flows (e.g., `getActivity → getContent → GetDuration`) because each tool result narrowed what the model could plausibly say next.
+On `main`, 3 out of 4 tool-dependent prompts returned fabricated answers without calling any tool. On `huys-version`, all 4 tools fired correctly in sequence for the chain-all test, each waiting for the real observation before proceeding to the next.
+
+1. **Reasoning**: On `huys-version`, the `Thought` at each step was a genuine decision grounded in the previous tool result — e.g. *"I have the activity data. Now I need to call getContent..."*. On `main`, the Thought was decorative: the model wrote all Thoughts, Actions, and fabricated Observations in a single response, so the visible reasoning never gated any tool call. Forcing the model to stop after each Action turned Thought from a narrative wrapper into a real checkpoint.
+
+2. **Reliability**: On `main`, the agent was slower than a chatbot with no accuracy benefit — "Gợi ý địa điểm check-in ở Sài Gòn" took 25s but returned the same training-data answer a chatbot would give in ~2s, with a false impression of tool grounding. On `huys-version`, the same prompt correctly called `getActivity` and returned data from the tool. The agent only genuinely outperforms a chatbot when forced tool execution prevents the model from shortcutting through training knowledge.
+
+3. **Observation**: On `huys-version`, each real observation visibly shaped the next Thought. After `getActivity` returned *"Phở Gánh Hàng Chiếu (Ăn lúc 3h sáng)"*, the model's next `getContent` call referenced that exact place name — grounded in the actual tool result. On `main`, the model fabricated observations that always "succeeded", removing any corrective signal. The one real error on `main` (CHAIN_ALL, where `getActivity` actually ran and returned a failure) is the only moment feedback landed — and it visibly changed the next response, proving the mechanism works when the architecture forces it.
 
 ---
 
@@ -149,6 +172,6 @@ class ClaudeProvider(LLMProvider):
 
 - **Scalability**: Replace the sequential `while` loop with an async task queue (e.g., `asyncio` + `anyio`). Each tool call becomes a coroutine, allowing multiple independent tool calls within a single reasoning step to run in parallel and reducing total latency for multi-tool queries.
 
-- **Safety**: Add a lightweight "Supervisor" LLM pass that inspects each `Action` before execution — checking that the tool name is valid, arguments are well-formed, and the call is consistent with the user's original intent. This catches prompt-injection attempts (e.g., a crafted `insight_gap` field that smuggles a new `Action:` into the observation) before they reach `_execute_tool`.
+- **Safety**: Add a lightweight "Supervisor" LLM pass that inspects each `Action` before execution — checking that the tool name is valid, arguments are well-formed, and the call is consistent with the user's original intent. This catches prompt-injection attempts (e.g., a crafted `insight_gap` field that smuggles a new `Action:`) and also prevents the hallucination pattern seen in live tests — a supervisor can detect when the model writes its own Observation and reject the response before the tool dispatcher is reached.
 
 - **Performance**: With more than ~10 tools, grepping the full `TOOLS` list into every system prompt is wasteful and degrades instruction-following. Replace it with a vector DB (e.g., ChromaDB) that retrieves the top-k most relevant tool descriptions at query time, keeping the system prompt short and focused regardless of how many tools are registered.

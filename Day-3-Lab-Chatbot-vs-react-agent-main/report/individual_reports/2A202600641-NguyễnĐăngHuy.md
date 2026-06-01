@@ -182,6 +182,25 @@ On `main`, 3 out of 4 tool-dependent prompts returned fabricated answers without
 
 ---
 
+### Evaluation Metrics: `main` vs `huys-version` (per `EVALUATION.md`)
+
+| Metric | `main` | `huys-version` | Winner |
+|--------|--------|----------------|--------|
+| **Token efficiency** | 1 LLM call, large fabricated completion | Multiple calls, short completions per step | `huys-version` — paying for correct answers |
+| **Latency** | ~25s (single-tool), ~50s (multi-tool) | Higher wall-clock (sequential calls) | `main` on raw speed, but answers are wrong |
+| **Loop count / termination** | Exits at step 0 — premature, not correct | Exits after real tool chain completes | `huys-version` — terminates correctly |
+| **Failure mode** | Silent hallucination — looks like success in logs | Explicit FORMAT_VIOLATION — logged, recoverable | `huys-version` — failures are honest and traceable |
+
+**Token efficiency**: `main` appears cheaper but spends tokens fabricating wrong answers. `huys-version` costs more per query but every token contributes to a grounded result.
+
+**Latency**: `main` finishes in fewer seconds because it makes one LLM call and fabricates everything. This is not a useful speed advantage — the EVALUATION.md goal of "responses within 200ms–2s" only applies to *correct* responses.
+
+**Loop count**: `main` always hits `AGENT_END steps: 0`, which looks like perfect termination in the logs. It is actually premature exit — `Final Answer` matched before any `Action` was dispatched. `huys-version` correctly terminates after 1, 2, or 4 steps depending on how many tools the task requires. That is the behavior `EVALUATION.md` is measuring.
+
+**Failure analysis**: `main`'s failure mode is the hardest to catch — the logs show `AGENT_END` with a plausible-looking answer and no error anywhere. In a production system this would silently serve wrong data to users. `huys-version`'s failures surface as explicit `FORMAT_VIOLATION` or `Error:` observations in the log — detectable, debuggable, and fixable. As `INSTRUCTOR_GUIDE.md` states: *"The trace is the truth."* On `main`, the trace lies.
+
+---
+
 ## IV. Future Improvements (5 Points)
 
 - **Build a UI to visualize the reasoning chain**: The current agent outputs steps as terminal text, which is hard to follow for someone new to the ReAct concept. Building a proper web UI (e.g., with Streamlit) would render the full Thought → Action → Observation chain as an interactive step-by-step timeline — each cycle displayed as a colored card, with collapsible observations and a sidebar showing which tools have been called. This makes the agent's internal logic *visible and learnable*, not just functional. It is especially useful for teaching: a student can watch the agent "think out loud" in a browser rather than reading raw JSON logs.

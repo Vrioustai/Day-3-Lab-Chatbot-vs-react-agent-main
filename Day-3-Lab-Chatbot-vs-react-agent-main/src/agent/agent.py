@@ -168,14 +168,13 @@ Observation: <result returned by the tool — filled in automatically>
 ... (repeat Thought/Action/Observation as needed)
 Final Answer: <your final response to the user>"""
 
-    def run(self, user_input: str) -> str:
+    def run(self, user_input: str, verbose: bool = False) -> str:
         logger.log_event("AGENT_START", {"input": user_input, "model": self.llm.model_name})
 
         current_prompt = user_input
         steps = 0
 
         while steps < self.max_steps:
-            # Generate LLM response
             result = self.llm.generate(current_prompt, system_prompt=self.get_system_prompt())
             response_text = result["content"]
 
@@ -193,8 +192,29 @@ Final Answer: <your final response to the user>"""
                 tool_name = action_match.group(1).strip()
                 tool_args = action_match.group(2).strip()
                 observation = self._execute_tool(tool_name, tool_args)
+
+                if verbose:
+                    thought_match = re.search(r"Thought:\s*(.*?)(?=\nAction:|\Z)", response_text, re.DOTALL)
+                    thought = thought_match.group(1).strip() if thought_match else ""
+                    obs_preview = observation[:200] + ("..." if len(observation) > 200 else "")
+                    print(f"\n{'─' * 50}")
+                    print(f" Step {steps + 1}")
+                    print(f"{'─' * 50}")
+                    print(f" Thought   : {thought}")
+                    print(f" Action    : {tool_name}({tool_args[:100]}{'...' if len(tool_args) > 100 else ''})")
+                    print(f" Observation: {obs_preview}")
+                    print(f"{'─' * 50}")
+
                 current_prompt += f"\n{response_text}\nObservation: {observation}"
             else:
+                if verbose:
+                    thought_match = re.search(r"Thought:\s*(.*)", response_text, re.DOTALL)
+                    thought = thought_match.group(1).strip() if thought_match else response_text.strip()
+                    print(f"\n{'─' * 50}")
+                    print(f" Step {steps + 1}")
+                    print(f"{'─' * 50}")
+                    print(f" Thought   : {thought[:200]}{'...' if len(thought) > 200 else ''}")
+                    print(f"{'─' * 50}")
                 current_prompt += f"\n{response_text}"
 
             steps += 1
@@ -296,6 +316,7 @@ Final Answer: <your final response to the user>"""
             "title_suggestions": title_suggestions,
             "script_scenes": script_scenes
         }
+    
 
     def GetDuration(content_output: dict) -> dict:
         """

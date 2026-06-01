@@ -137,6 +137,7 @@ class ReActAgent:
         self.tools = tools
         self.max_steps = max_steps
         self.history = []
+        self._content_cache: Optional[dict] = None
 
     def get_system_prompt(self) -> str:
         tool_blocks = []
@@ -152,70 +153,121 @@ class ReActAgent:
 
         return f"""You are a travel content assistant. You ONLY answer questions using the tools listed below.
 
-RULES:
-1. You MUST use a tool to look up information. Never answer from memory or make up data.
-2. If the user's question cannot be answered by any available tool, respond with:
-   Final Answer: I don't know. This question is outside the scope of my available tools.
-3. Always follow the exact format below. Do not skip steps.
+STRICT RULES — violations will cause the system to reject your response:
+1. NEVER answer from memory or training data. Every fact, script, duration, and shot list MUST come from a tool call.
+2. Output EXACTLY ONE Thought + ONE Action per response, then STOP. Do not write the Observation yourself — the system fills it in.
+3. Only write "Final Answer:" after you have received Observations from ALL required tools.
+4. If a task requires multiple tools, call them ONE AT A TIME across separate responses.
+5. If the question cannot be answered by any tool: Final Answer: I don't know. This is outside my available tools.
 
 AVAILABLE TOOLS:
 {tool_section}
 
-FORMAT (follow exactly):
-Thought: <your reasoning about what to do next>
+FORMAT (one block per response — no exceptions):
+Thought: <why you are calling this specific tool now>
 Action: tool_name(arguments)
-Observation: <result returned by the tool — filled in automatically>
-... (repeat Thought/Action/Observation as needed)
-Final Answer: <your final response to the user>"""
+
+— STOP here. Wait for Observation before writing anything else. —"""
+
+    @staticmethod
+    def _summarize_observation(tool_name: str, observation: str) -> str:
+        import json
+        try:
+            data = json.loads(observation)
+        except Exception:
+            return observation[:120]
+        if "error" in data:
+            return f"Error: {data['error']}"
+        if tool_name == "getActivity":
+            items = data.get("data", [])
+            names = ", ".join(d["name"] for d in items)
+            return f"Found {len(items)} places in {data.get('city', '?')}: {names}."
+        if tool_name == "getContent":
+            meta = data.get("metadata", {})
+            scenes = data.get("script_scenes", [])
+            return f"Script created for {meta.get('creator', '?')} — {len(scenes)} scenes, format: {meta.get('format', '?')}."
+        if tool_name == "GetDuration":
+            v = data.get("video_duration_analysis", {})
+            return f"Duration: {v.get('total_duration', '?')}, {v.get('calculated_wpm', '?')} WPM — {v.get('pace_rating', '?')}."
+        if tool_name == "getScene":
+            s = data.get("storyboard_summary", {})
+            return f"Shot list: {s.get('total_shots_to_film', '?')} shots, ~{s.get('estimated_shooting_time', '?')}."
+        return observation[:120]
+
+    @staticmethod
+    def _parse_action(response_text: str):
+        """Extract (tool_name, args) by counting parenthesis depth — handles nested parens in args."""
+        m = re.search(r"Action:\s*(\w+)\(", response_text)
+        if not m:
+            return None
+        tool_name = m.group(1)
+        start = m.end()
+        depth, i = 1, start
+        while i < len(response_text) and depth > 0:
+            if response_text[i] == '(':
+                depth += 1
+            elif response_text[i] == ')':
+                depth -= 1
+            i += 1
+        if depth != 0:
+            return None
+        return tool_name, response_text[start:i - 1].strip()
 
     def run(self, user_input: str, verbose: bool = False) -> str:
         logger.log_event("AGENT_START", {"input": user_input, "model": self.llm.model_name})
 
+        self._content_cache = None
         current_prompt = user_input
+        called_tools: list[str] = []
         steps = 0
 
         while steps < self.max_steps:
             result = self.llm.generate(current_prompt, system_prompt=self.get_system_prompt())
             response_text = result["content"]
-
             logger.log_event("AGENT_STEP", {"step": steps, "response": response_text})
 
-            # If Final Answer found -> return it
+            thought_match = re.search(r"Thought:\s*(.*?)(?=\nAction:|\nFinal Answer:|\Z)", response_text, re.DOTALL)
+            thought = thought_match.group(1).strip() if thought_match else ""
+            parsed_action = self._parse_action(response_text)
             final_match = re.search(r"Final Answer:\s*(.*)", response_text, re.DOTALL)
-            if final_match:
+
+            label = f"[{steps + 1}]"
+            if verbose and thought:
+                print(f"{label} 💭 {re.split(r'(?<=[.!?])\\s', thought)[0]}")
+
+            if parsed_action:
+                tool_name, tool_args = parsed_action
+                if verbose:
+                    flag = " ⚠ premature Final Answer ignored" if final_match else ""
+                    print(f"{label} ⚡ {tool_name}({tool_args[:80]}{'...' if len(tool_args) > 80 else ''}){flag}")
+
+                observation = self._execute_tool(tool_name, tool_args)
+                called_tools.append(tool_name)
+                logger.log_event("TOOL_CALL", {
+                    "step": steps + 1, "thought": thought, "tool": tool_name,
+                    "args": tool_args[:300], "observation": self._summarize_observation(tool_name, observation),
+                })
+                if verbose:
+                    print(f"{label} 👁  {self._summarize_observation(tool_name, observation)}\n")
+                current_prompt += f"\n{response_text}\nObservation: {observation}"
+
+            elif final_match:
+                if verbose:
+                    print(f"{label} ✅ Final Answer")
                 logger.log_event("AGENT_END", {"steps": steps})
                 return final_match.group(1).strip()
 
-            # Parse Action: tool_name(arguments)
-            action_match = re.search(r"Action:\s*(\w+)\((.*?)\)", response_text, re.DOTALL)
-            if action_match:
-                tool_name = action_match.group(1).strip()
-                tool_args = action_match.group(2).strip()
-                observation = self._execute_tool(tool_name, tool_args)
-
-                if verbose:
-                    thought_match = re.search(r"Thought:\s*(.*?)(?=\nAction:|\Z)", response_text, re.DOTALL)
-                    thought = thought_match.group(1).strip() if thought_match else ""
-                    obs_preview = observation[:200] + ("..." if len(observation) > 200 else "")
-                    print(f"\n{'─' * 50}")
-                    print(f" Step {steps + 1}")
-                    print(f"{'─' * 50}")
-                    print(f" Thought   : {thought}")
-                    print(f" Action    : {tool_name}({tool_args[:100]}{'...' if len(tool_args) > 100 else ''})")
-                    print(f" Observation: {obs_preview}")
-                    print(f"{'─' * 50}")
-
-                current_prompt += f"\n{response_text}\nObservation: {observation}"
             else:
+                done = ", ".join(called_tools) if called_tools else "none"
+                correction = (
+                    f"\n[SYSTEM] Format violation. Tools called so far: [{done}]. "
+                    f"Write exactly ONE Thought + ONE Action for the next required tool, then STOP. "
+                    f"Do NOT write Observation or Final Answer."
+                )
+                logger.log_event("FORMAT_VIOLATION", {"step": steps + 1, "called": called_tools})
                 if verbose:
-                    thought_match = re.search(r"Thought:\s*(.*)", response_text, re.DOTALL)
-                    thought = thought_match.group(1).strip() if thought_match else response_text.strip()
-                    print(f"\n{'─' * 50}")
-                    print(f" Step {steps + 1}")
-                    print(f"{'─' * 50}")
-                    print(f" Thought   : {thought[:200]}{'...' if len(thought) > 200 else ''}")
-                    print(f"{'─' * 50}")
-                current_prompt += f"\n{response_text}"
+                    print(f"{label} ⚠  Format violation — tools so far: [{done}]\n")
+                current_prompt += correction
 
             steps += 1
 
@@ -318,18 +370,35 @@ Final Answer: <your final response to the user>"""
         }
     
 
+    @staticmethod
+    def _extract_scenes(content_output: dict) -> list:
+        """Try common key patterns to find the scenes list from a getContent output."""
+        for key in ("script_scenes", "scenes"):
+            val = content_output.get(key)
+            if isinstance(val, list) and val:
+                return val
+        # one level deeper: {"script": {"scenes": [...]}}
+        nested = content_output.get("script", {})
+        if isinstance(nested, dict):
+            for key in ("script_scenes", "scenes"):
+                val = nested.get(key)
+                if isinstance(val, list) and val:
+                    return val
+        return []
+
     def GetDuration(content_output: dict) -> dict:
         """
         Tool phân tích thời lượng kịch bản, tính toán tốc độ nói và tối ưu nhịp độ video.
-        
+
         Input: Output (Dictionary) của hàm getContent.
         Output: Bản phân tích thông số thời lượng và lời khuyên giữ chân khán giả (Mock Data).
         """
-        # 1. Kiểm tra tính hợp lệ của dữ liệu đầu vào
         if content_output.get("status") != "success":
             return {"error": "Dữ liệu đầu vào từ getContent không hợp lệ hoặc thiếu kịch bản."}
 
-        scenes = content_output.get("script_scenes", [])
+        scenes = ReActAgent._extract_scenes(content_output)
+        if not scenes:
+            return {"error": "Không tìm thấy script_scenes. Hãy truyền trực tiếp output của getContent."}
         creator_name = content_output.get("metadata", {}).get("creator", "Creator")
         
         total_words = 0
@@ -367,12 +436,13 @@ Final Answer: <your final response to the user>"""
         # 4. Phân bổ cấu trúc thời lượng hình học (Retention Structure)
         hook_sec = 5
         cta_sec = 15
-        body_sec = total_seconds - (hook_sec + cta_sec)
+        body_sec = max(0, total_seconds - (hook_sec + cta_sec))
 
+        def pct(part): return round(part / total_seconds * 100, 1) if total_seconds > 0 else 0
         duration_breakdown = {
-            "hook_segment": f"{hook_sec}s (Chiếm {round((hook_sec/total_seconds)*100, 1)}% tổng thời lượng) - Giữ chân 3s đầu",
-            "body_segment": f"{body_sec}s (Chiếm {round((body_sec/total_seconds)*100, 1)}% tổng thời lượng) - Truyền tải nội dung",
-            "cta_segment": f"{cta_sec}s (Chiếm {round((cta_sec/total_seconds)*100, 1)}% tổng thời lượng) - Kêu gọi tương tác"
+            "hook_segment": f"{hook_sec}s (Chiếm {pct(hook_sec)}% tổng thời lượng) - Giữ chân 3s đầu",
+            "body_segment": f"{body_sec}s (Chiếm {pct(body_sec)}% tổng thời lượng) - Truyền tải nội dung",
+            "cta_segment": f"{cta_sec}s (Chiếm {pct(cta_sec)}% tổng thời lượng) - Kêu gọi tương tác"
         }
 
         # 5. Tự động sinh Khuyến nghị tối ưu (Optimization Tips)
@@ -404,11 +474,12 @@ Final Answer: <your final response to the user>"""
         Input: Output (Dictionary) của hàm getContent.
         Output: Danh sách các cảnh quay chi tiết phục vụ việc bấm máy quay (Mock Data).
         """
-        # 1. Kiểm tra tính hợp lệ của dữ liệu đầu vào
         if content_output.get("status") != "success":
             return {"error": "Dữ liệu đầu vào từ getContent không hợp lệ."}
 
-        script_scenes = content_output.get("script_scenes", [])
+        script_scenes = ReActAgent._extract_scenes(content_output)
+        if not script_scenes:
+            return {"error": "Không tìm thấy script_scenes. Hãy truyền trực tiếp output của getContent."}
         creator_name = content_output.get("metadata", {}).get("creator", "Creator")
     
         shot_list = []
@@ -417,27 +488,23 @@ Final Answer: <your final response to the user>"""
         shot_types = ["Extreme Close-up (Đặc tả biểu cảm mặt)", "Medium Shot (Trung cảnh ngang ngực)", "POV (Góc nhìn thứ nhất)", "Wide Shot (Toàn cảnh bối cảnh)"]
         camera_movements = ["Static (Giữ máy cố định)", "Push-in (Dịch máy vào gần chậm)", "Pan Left/Right (Quét máy sang ngang)", "Handheld (Cầm tay rung lắc tự nhiên)"]
     
-    # 2. Vòng lặp tự động "chuyển thể" từng phân cảnh chữ thành thông số kỹ thuật quay
         for idx, scene in enumerate(script_scenes):
             time_frame = scene.get("time", "00:00")
             visual_desc = scene.get("visual", "")
-        
-        # Phân bổ góc quay thông minh dựa theo thứ tự phân cảnh (Mở màn thường quay Toàn/Cận, giữa clip quay POV/Trung)
             shot_type = shot_types[idx % len(shot_types)]
             movement = camera_movements[idx % len(camera_movements)]
-        
-        # Tạo hướng dẫn quay thực tế dựa trên số cảnh
+
             if idx == 0:
                 director_note = "Phải giữ chân người xem trong 3 giây đầu. Mặt Creator phải biểu cảm thật cường điệu hoặc đứng ở vị trí gây tò mò."
                 props = "Điện thoại quay, Mic không dây gắn áo."
             elif idx == len(script_scenes) - 1:
                 director_note = "Cảnh kết thúc, Creator nhìn thẳng vào ống kính để kêu gọi comment hành động. Text CTA nhảy ra bên cạnh tai."
                 props = "Sản phẩm/Đạo cụ đặc trưng của kênh để tạo độ nhận diện."
-        else:
-            director_note = "Quay B-roll chèn xen kẽ liên tục mỗi 2 giây một góc máy khác để người xem không bị nhàm chán."
-            props = "Chân máy (Tripod) di động hoặc Gimbal cầm tay."
+            else:
+                director_note = "Quay B-roll chèn xen kẽ liên tục mỗi 2 giây một góc máy khác để người xem không bị nhàm chán."
+                props = "Chân máy (Tripod) di động hoặc Gimbal cầm tay."
 
-            shot_item = {
+            shot_list.append({
                 "scene_number": idx + 1,
                 "time_range": time_frame,
                 "script_context": visual_desc,
@@ -450,18 +517,16 @@ Final Answer: <your final response to the user>"""
                     "equipment_needed": props,
                     "director_note": director_note
                 }
-            }
-            shot_list.append(shot_item)
+            })
 
-    # 3. Trả về kết quả Bản phân cảnh quay sạch sẽ
         return {
             "status": "success",
             "storyboard_summary": {
                 "total_shots_to_film": len(shot_list),
                 "estimated_shooting_time": "30 - 45 phút tại hiện trường",
                 "aspect_ratio_target": "9:16 (Dọc - TikTok/Shorts/Reels)"
-        },
-        "detailed_shot_list": shot_list
+            },
+            "detailed_shot_list": shot_list
         }
         
     def _execute_tool(self, tool_name: str, args: str) -> str:
@@ -473,22 +538,26 @@ Final Answer: <your final response to the user>"""
 
         try:
             if tool_name == "getActivity":
-                # args: "Ha Noi, am_thuc"
                 parts = [a.strip().strip("\"'") for a in args.split(",", 1)]
                 result = ReActAgent.getActivity(*parts)
 
             elif tool_name == "getContent":
-                # args: <json_dict>, <json_dict> [, <json_dict>]
                 parsed = json.loads(f"[{args}]")
                 result = ReActAgent.getContent(*parsed)
+                if result.get("status") == "success":
+                    self._content_cache = result
 
             elif tool_name == "GetDuration":
-                parsed = json.loads(args)
-                result = ReActAgent.GetDuration(parsed)
+                content = self._content_cache
+                if content is None:
+                    return "Error: getContent must be called before GetDuration."
+                result = ReActAgent.GetDuration(content)
 
             elif tool_name == "getScene":
-                parsed = json.loads(args)
-                result = ReActAgent.getScene(parsed)
+                content = self._content_cache
+                if content is None:
+                    return "Error: getContent must be called before getScene."
+                result = ReActAgent.getScene(content)
 
             else:
                 return f"Tool '{tool_name}' is registered but has no handler."

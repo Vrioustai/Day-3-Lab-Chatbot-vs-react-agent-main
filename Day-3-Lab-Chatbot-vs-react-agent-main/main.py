@@ -5,7 +5,14 @@ from dotenv import load_dotenv
 load_dotenv()
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+import logging
 from src.agent.agent import ReActAgent, TOOLS
+
+# Send logs to file only — keep the console clean for cycle display
+logging.getLogger("AI-Lab-Agent").handlers = [
+    h for h in logging.getLogger("AI-Lab-Agent").handlers
+    if not isinstance(h, logging.StreamHandler) or isinstance(h, logging.FileHandler)
+]
 
 
 def get_llm():

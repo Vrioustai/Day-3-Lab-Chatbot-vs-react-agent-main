@@ -134,8 +134,16 @@ TOOLS = [
             "platform": "Chuỗi nền tảng: 'tiktok', 'youtube_shorts', hoặc 'reels'.",
         },
         "example": "Action: generate_seo_metadata(<content_output dict>, tiktok)",
-    },
-]
+    },    {
+        "name": "budget_estimator",
+        "description": "Ước tính chi phí sản xuất thực tế tại hiện trường cho Creator.",
+        "parameters": {
+            "city": "Tên thành phố nơi sản xuất. Ví dụ: 'Ha Noi' hoặc 'Sai Gon'.",
+            "duration_days": "Số ngày sản xuất.",
+            "crew_size": "Số lượng nhân sự tham gia (mặc định 1)."
+        },
+        "example": "Action: budget_estimator(Ha Noi, 3, 2)"
+    },]
 
 
 class ReActAgent:
@@ -293,6 +301,30 @@ Final Answer: <your final response to the user>"""
             "city": city,
             "category": categories,
             "data": ACTIVITIES_DB[city_key][cate_key]
+        }
+
+    @staticmethod
+    def budget_estimator(city: str, duration_days: int, crew_size: int = 1) -> dict:
+        """
+        Tool ước tính chi phí sản xuất thực tế tại hiện trường cho Creator.
+        """
+        city_key = clean_input(city)
+        base_costs = {
+            "ha_noi": {"hotel": 400000, "food": 250000, "move": 100000},
+            "sai_gon": {"hotel": 500000, "food": 300000, "move": 120000}
+        }
+
+        cost = base_costs.get(city_key, {"hotel": 300000, "food": 200000, "move": 80000})
+        total = (cost["hotel"] + cost["food"] + cost["move"]) * duration_days * crew_size
+
+        return {
+            "status": "success",
+            "estimated_total": f"{total:,} VND",
+            "breakdown": {
+                "di_chuyen_noi_thanh": f"{(cost['move'] * duration_days):,} VND",
+                "an_uong_trai_nghiem": f"{(cost['food'] * duration_days * crew_size):,} VND"
+            },
+            "monetization_tip": "Khuyến nghị chèn 1 slot tiếp thị liên kết (Affiliate) đồ dùng du lịch hoặc liên hệ homestay xin tài trợ chỗ ở để giảm 40% chi phí này."
         }
 
     @staticmethod
@@ -631,6 +663,21 @@ Final Answer: <your final response to the user>"""
                 # FIX 3: auto-save for follow-up tool calls
                 if isinstance(result, dict) and result.get("status") == "success":
                     self.last_content_output = result
+
+            elif tool_name == "budget_estimator":
+                parts = [a.strip().strip("\"'") for a in args.split(",")]
+                if len(parts) == 2:
+                    city, duration_days = parts
+                    crew_size = 1
+                elif len(parts) == 3:
+                    city, duration_days, crew_size = parts
+                else:
+                    return "Error executing 'budget_estimator': expected arguments city, duration_days, [crew_size]."
+
+                try:
+                    result = ReActAgent.budget_estimator(city, int(duration_days), int(crew_size))
+                except ValueError:
+                    return "Error executing 'budget_estimator': duration_days and crew_size must be integers."
 
             elif tool_name == "GetDuration":
                 parsed = json.loads(args)

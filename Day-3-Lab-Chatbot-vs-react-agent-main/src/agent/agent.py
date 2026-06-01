@@ -88,6 +88,44 @@ def clean_input(text: str) -> str:
     text = text.replace(" ", "_")
     return text
 
+TOOLS = [
+    {
+        "name": "getActivity",
+        "description": "Gợi ý địa điểm du lịch kèm fact và insight_gap cho content creator.",
+        "parameters": {
+            "city": "Tên thành phố. Chỉ hỗ trợ: 'Ha Noi' hoặc 'Sai Gon'.",
+            "categories": "Danh mục hoạt động. Chỉ hỗ trợ: 'am_thuc', 'check_in', 'hidden_gem'.",
+        },
+        "example": "Action: getActivity(Ha Noi, am_thuc)",
+    },
+    {
+        "name": "getContent",
+        "description": "Tự động viết kịch bản video ngắn (TikTok/Reels) theo persona của creator và địa điểm đã chọn.",
+        "parameters": {
+            "activity_item": "Một phần tử dict từ kết quả getActivity (chứa name, fact, insight_gap).",
+            "creator_persona": "Dict mô tả creator: name, tone_of_voice, catchphrases.",
+            "trending_info": "(Tuỳ chọn) Dict chứa audio và format đang viral.",
+        },
+        "example": 'Action: getContent({"name": "...", "fact": "...", "insight_gap": "..."}, {"name": "Creator X", "tone_of_voice": "Hài hước", "catchphrases": ["Ủa alo?"]})',
+    },
+    {
+        "name": "GetDuration",
+        "description": "Phân tích thời lượng kịch bản, tốc độ nói và đưa ra khuyến nghị tối ưu nhịp độ video.",
+        "parameters": {
+            "content_output": "Dict kết quả trả về từ getContent.",
+        },
+        "example": "Action: GetDuration(<content_output dict>)",
+    },
+    {
+        "name": "getScene",
+        "description": "Chuyển kịch bản thành bản phân cảnh quay chi tiết (shot list) gồm góc máy, chuyển động và đạo cụ.",
+        "parameters": {
+            "content_output": "Dict kết quả trả về từ getContent.",
+        },
+        "example": "Action: getScene(<content_output dict>)",
+    },
+]
+
 class ReActAgent:
     """
     SKELETON: A ReAct-style Agent that follows the Thought-Action-Observation loop.
@@ -101,51 +139,68 @@ class ReActAgent:
         self.history = []
 
     def get_system_prompt(self) -> str:
-        """
-        TODO: Implement the system prompt that instructs the agent to follow ReAct.
-        Should include:
-        1.  Available tools and their descriptions.
-        2.  Format instructions: Thought, Action, Observation.
-        """
-        tool_descriptions = "\n".join([f"- {t['name']}: {t['description']}" for t in self.tools])
-        return f"""
-        You are an intelligent assistant. You have access to the following tools:
-        {tool_descriptions}
+        tool_blocks = []
+        for t in self.tools:
+            params = "\n".join([f"    - {k}: {v}" for k, v in t.get("parameters", {}).items()])
+            tool_blocks.append(
+                f"  Tool: {t['name']}\n"
+                f"  Description: {t['description']}\n"
+                f"  Parameters:\n{params}\n"
+                f"  Example: {t.get('example', '')}"
+            )
+        tool_section = "\n\n".join(tool_blocks)
 
-        Use the following format:
-        Thought: your line of reasoning.
-        Action: tool_name(arguments)
-        Observation: result of the tool call.
-        ... (repeat Thought/Action/Observation if needed)
-        Final Answer: your final response.
-        """
+        return f"""You are a travel content assistant. You ONLY answer questions using the tools listed below.
+
+RULES:
+1. You MUST use a tool to look up information. Never answer from memory or make up data.
+2. If the user's question cannot be answered by any available tool, respond with:
+   Final Answer: I don't know. This question is outside the scope of my available tools.
+3. Always follow the exact format below. Do not skip steps.
+
+AVAILABLE TOOLS:
+{tool_section}
+
+FORMAT (follow exactly):
+Thought: <your reasoning about what to do next>
+Action: tool_name(arguments)
+Observation: <result returned by the tool — filled in automatically>
+... (repeat Thought/Action/Observation as needed)
+Final Answer: <your final response to the user>"""
 
     def run(self, user_input: str) -> str:
-        """
-        TODO: Implement the ReAct loop logic.
-        1. Generate Thought + Action.
-        2. Parse Action and execute Tool.
-        3. Append Observation to prompt and repeat until Final Answer.
-        """
         logger.log_event("AGENT_START", {"input": user_input, "model": self.llm.model_name})
-        
+
         current_prompt = user_input
         steps = 0
 
         while steps < self.max_steps:
-            # TODO: Generate LLM response
-            # result = self.llm.generate(current_prompt, system_prompt=self.get_system_prompt())
-            
-            # TODO: Parse Thought/Action from result
-            
-            # TODO: If Action found -> Call tool -> Append Observation
-            
-            # TODO: If Final Answer found -> Break loop
-            
+            # Generate LLM response
+            result = self.llm.generate(current_prompt, system_prompt=self.get_system_prompt())
+            response_text = result["content"]
+
+            logger.log_event("AGENT_STEP", {"step": steps, "response": response_text})
+
+            # If Final Answer found -> return it
+            final_match = re.search(r"Final Answer:\s*(.*)", response_text, re.DOTALL)
+            if final_match:
+                logger.log_event("AGENT_END", {"steps": steps})
+                return final_match.group(1).strip()
+
+            # Parse Action: tool_name(arguments)
+            action_match = re.search(r"Action:\s*(\w+)\((.*?)\)", response_text, re.DOTALL)
+            if action_match:
+                tool_name = action_match.group(1).strip()
+                tool_args = action_match.group(2).strip()
+                observation = self._execute_tool(tool_name, tool_args)
+                current_prompt += f"\n{response_text}\nObservation: {observation}"
+            else:
+                current_prompt += f"\n{response_text}"
+
             steps += 1
-            
+
         logger.log_event("AGENT_END", {"steps": steps})
-        return "Not implemented. Fill in the TODOs!"
+        return "Max steps reached without a Final Answer."
 
     @staticmethod
     def getActivity(city: str, categories: str) -> dict:
@@ -389,11 +444,35 @@ class ReActAgent:
         }
         
     def _execute_tool(self, tool_name: str, args: str) -> str:
-        """
-        Helper method to execute tools by name.
-        """
-        for tool in self.tools:
-            if tool['name'] == tool_name:
-                # TODO: Implement dynamic function calling or simple if/else
-                return f"Result of {tool_name}"
-        return f"Tool {tool_name} not found."
+        import json
+
+        known_tools = {t['name'] for t in self.tools}
+        if tool_name not in known_tools:
+            return f"Tool '{tool_name}' not found."
+
+        try:
+            if tool_name == "getActivity":
+                # args: "Ha Noi, am_thuc"
+                parts = [a.strip().strip("\"'") for a in args.split(",", 1)]
+                result = ReActAgent.getActivity(*parts)
+
+            elif tool_name == "getContent":
+                # args: <json_dict>, <json_dict> [, <json_dict>]
+                parsed = json.loads(f"[{args}]")
+                result = ReActAgent.getContent(*parsed)
+
+            elif tool_name == "GetDuration":
+                parsed = json.loads(args)
+                result = ReActAgent.GetDuration(parsed)
+
+            elif tool_name == "getScene":
+                parsed = json.loads(args)
+                result = ReActAgent.getScene(parsed)
+
+            else:
+                return f"Tool '{tool_name}' is registered but has no handler."
+
+        except Exception as e:
+            return f"Error executing '{tool_name}': {e}"
+
+        return json.dumps(result, ensure_ascii=False)

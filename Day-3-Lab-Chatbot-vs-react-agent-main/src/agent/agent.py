@@ -4,7 +4,7 @@ from typing import List, Dict, Any, Optional
 from src.core.llm_provider import LLMProvider
 from src.telemetry.logger import logger
 
-# 🗄️ DATABASE: Được thiết kế chi tiết với Fact và Insight để Agent dễ "bắt chữ" lên kịch bản
+# 🗄️ DATABASE
 ACTIVITIES_DB = {
     "ha_noi": {
         "am_thuc": [
@@ -74,6 +74,7 @@ ACTIVITIES_DB = {
     }
 }
 
+
 def clean_input(text: str) -> str:
     """Chuẩn hóa tiếng Việt không dấu và viết liền để dễ map key"""
     text = text.lower().strip()
@@ -87,6 +88,7 @@ def clean_input(text: str) -> str:
     text = text.replace("ho chi minh", "sai gon").replace("hcm", "sai gon")
     text = text.replace(" ", "_")
     return text
+
 
 TOOLS = [
     {
@@ -124,19 +126,36 @@ TOOLS = [
         },
         "example": "Action: getScene(<content_output dict>)",
     },
+    {
+        "name": "generate_seo_metadata",
+        "description": "Sinh metadata SEO cho video ngắn dựa trên output của getContent.",
+        "parameters": {
+            "content_output": "Dict kết quả trả về từ getContent.",
+            "platform": "Chuỗi nền tảng: 'tiktok', 'youtube_shorts', hoặc 'reels'.",
+        },
+        "example": "Action: generate_seo_metadata(<content_output dict>, tiktok)",
+    },
 ]
+
 
 class ReActAgent:
     """
-    SKELETON: A ReAct-style Agent that follows the Thought-Action-Observation loop.
-    Students should implement the core loop logic and tool execution.
+    ReAct-style Agent with conversation history and cross-turn state persistence.
+    Fixes:
+      1. self.history is now read and written — enables follow-up queries like "kịch bản vừa tạo".
+      2. self.last_content_output stores the last getContent result so downstream tools
+         (GetDuration, getScene, generate_seo_metadata) can reference it without re-running.
+      3. _execute_tool auto-saves getContent output into self.last_content_output.
     """
-    
+
     def __init__(self, llm: LLMProvider, tools: List[Dict[str, Any]], max_steps: int = 5):
         self.llm = llm
         self.tools = tools
         self.max_steps = max_steps
-        self.history = []
+        # FIX 1: history now accumulates turns so follow-up queries have context
+        self.history: List[str] = []
+        # FIX 2: persist last getContent output across run() calls
+        self.last_content_output: Optional[dict] = None
 
     def get_system_prompt(self) -> str:
         tool_blocks = []
@@ -157,6 +176,8 @@ RULES:
 2. If the user's question cannot be answered by any available tool, respond with:
    Final Answer: I don't know. This question is outside the scope of my available tools.
 3. Always follow the exact format below. Do not skip steps.
+4. When the user refers to "kịch bản vừa tạo", "kết quả trên", or "video trên", use the
+   content_output data already provided in the conversation context — do NOT call getContent again.
 
 AVAILABLE TOOLS:
 {tool_section}
@@ -168,10 +189,36 @@ Observation: <result returned by the tool — filled in automatically>
 ... (repeat Thought/Action/Observation as needed)
 Final Answer: <your final response to the user>"""
 
+    def _build_prompt(self, user_input: str) -> str:
+        """
+        Build the full prompt by prepending conversation history and, if relevant,
+        injecting the last content_output so follow-up tools can reference it directly.
+        """
+        import json
+
+        parts = []
+
+        # Inject persisted content_output when user refers to a previous result
+        followup_triggers = [
+            "vừa tạo", "kịch bản trên", "kết quả trên", "kết quả đó",
+            "trên đó", "video trên", "kịch bản vừa", "output trên"
+        ]
+        user_lower = user_input.lower()
+        if self.last_content_output and any(kw in user_lower for kw in followup_triggers):
+            injected = json.dumps(self.last_content_output, ensure_ascii=False)
+            parts.append(f"[Kịch bản đã tạo ở lượt trước — dùng trực tiếp làm content_output]:\n{injected}\n")
+
+        # Append previous conversation turns
+        if self.history:
+            parts.append("\n".join(self.history))
+
+        parts.append(f"User: {user_input}")
+        return "\n".join(parts)
+
     def run(self, user_input: str, verbose: bool = False) -> str:
         logger.log_event("AGENT_START", {"input": user_input, "model": self.llm.model_name})
 
-        current_prompt = user_input
+        current_prompt = self._build_prompt(user_input)
         steps = 0
 
         while steps < self.max_steps:
@@ -180,14 +227,17 @@ Final Answer: <your final response to the user>"""
 
             logger.log_event("AGENT_STEP", {"step": steps, "response": response_text})
 
-            # If Final Answer found -> return it
+            # Final Answer found → save history and return
             final_match = re.search(r"Final Answer:\s*(.*)", response_text, re.DOTALL)
             if final_match:
+                # FIX 1: persist this turn into history
+                self.history.append(f"User: {user_input}")
+                self.history.append(f"Assistant: {response_text}")
                 logger.log_event("AGENT_END", {"steps": steps})
                 return final_match.group(1).strip()
 
             # Parse Action: tool_name(arguments)
-            action_match = re.search(r"Action:\s*(\w+)\((.*?)\)", response_text, re.DOTALL)
+            action_match = re.search(r"Action:\s*(\w+)\((.*)\)", response_text, re.DOTALL)
             if action_match:
                 tool_name = action_match.group(1).strip()
                 tool_args = action_match.group(2).strip()
@@ -222,27 +272,22 @@ Final Answer: <your final response to the user>"""
         logger.log_event("AGENT_END", {"steps": steps})
         return "Max steps reached without a Final Answer."
 
+    # ─────────────────────────────────────────────
+    # Tool implementations (static / class methods)
+    # ─────────────────────────────────────────────
+
     @staticmethod
     def getActivity(city: str, categories: str) -> dict:
-        """
-        Tool gợi ý địa điểm, kèm sự thật (fact) và khoảng trống nội dung (insight_gap)
-        
-        Parameters:
-        - city (str): 'Ha Noi' hoặc 'Sai Gon'
-        - categories (str): 'am_thuc', 'check_in', 'hidden_gem'
-        """
         city_key = clean_input(city)
         cate_key = clean_input(categories)
-        
-        # Kiểm tra thành phố
+
         if city_key not in ACTIVITIES_DB:
-            return {"error": f"Hiện tại tool chỉ hỗ trợ dữ liệu cho 'ha_no' hoặc 'sai_gon'. Bạn nhập: '{city}'"}
-            
-        # Kiểm tra category
+            return {"error": f"Hiện tại tool chỉ hỗ trợ dữ liệu cho 'ha_noi' hoặc 'sai_gon'. Bạn nhập: '{city}'"}
+
         if cate_key not in ACTIVITIES_DB[city_key]:
             valid_cates = ", ".join(ACTIVITIES_DB[city_key].keys())
             return {"error": f"Không tìm thấy danh mục '{categories}'. Hãy chọn một trong các danh mục: {valid_cates}"}
-            
+
         return {
             "status": "success",
             "city": city,
@@ -250,37 +295,29 @@ Final Answer: <your final response to the user>"""
             "data": ACTIVITIES_DB[city_key][cate_key]
         }
 
+    @staticmethod
     def getContent(activity_item: dict, creator_persona: dict, trending_info: dict = None) -> dict:
-        """
-        Tool tự động viết kịch bản bằng cách giả lập (mock) dữ liệu dựa trên đầu vào.
-        Không gọi LLM, tự động sinh text chuẩn theo Persona và Insight Gap.
-        """
-        # 1. Bóc tách dữ liệu đầu vào
         location = activity_item.get("name", "Địa điểm bí ẩn")
         fact = activity_item.get("fact", "Một sự thật thú vị chưa được tiết lộ.")
         insight_gap = activity_item.get("insight_gap", "Góc tiếp cận độc lạ chưa ai làm.")
-        
+
         creator_name = creator_persona.get("name", "Creator X")
         tone = creator_persona.get("tone_of_voice", "Hài hước, châm biếm")
         catchphrases = creator_persona.get("catchphrases", ["Hết cứu", "Ủa alo?", "Thực tế là..."])
-        
-        # Lấy các câu cửa miệng để chèn vào kịch bản cho thật
+
         p1 = catchphrases[0] if len(catchphrases) > 0 else "Thực tế là..."
         p2 = catchphrases[1] if len(catchphrases) > 1 else "Hết cứu!"
         p3 = catchphrases[2] if len(catchphrases) > 2 else "Ủa alo?"
 
-        # 2. Giả lập định dạng Audio và Video nếu không có truyền vào
         audio = trending_info.get("audio", "Nhạc nền lôi cuốn đang viral") if trending_info else "Nhạc nền xu hướng TikTok"
         v_format = trending_info.get("format", "POV Shorts") if trending_info else "POV Clip ngắn"
 
-        # 3. Tự động tạo Tiêu đề giả lập (Hook Titles) theo style giật gân
         title_suggestions = [
             f"Đừng đi {location} nếu chưa biết sự thật này!",
             f"Cú lừa mang tên {location}? {p1}...",
             f"Trải nghiệm {location} theo phong cách... hành xác! ({p2})"
         ]
 
-        # 4. Tự động "may đo" kịch bản phân cảnh mô phỏng
         script_scenes = [
             {
                 "time": "00:00 - 00:05",
@@ -304,7 +341,6 @@ Final Answer: <your final response to the user>"""
             }
         ]
 
-        # 5. Trả về kết quả cấu trúc dict sạch sẽ
         return {
             "status": "success",
             "metadata": {
@@ -316,34 +352,24 @@ Final Answer: <your final response to the user>"""
             "title_suggestions": title_suggestions,
             "script_scenes": script_scenes
         }
-    
 
+    @staticmethod
     def GetDuration(content_output: dict) -> dict:
-        """
-        Tool phân tích thời lượng kịch bản, tính toán tốc độ nói và tối ưu nhịp độ video.
-        
-        Input: Output (Dictionary) của hàm getContent.
-        Output: Bản phân tích thông số thời lượng và lời khuyên giữ chân khán giả (Mock Data).
-        """
-        # 1. Kiểm tra tính hợp lệ của dữ liệu đầu vào
         if content_output.get("status") != "success":
             return {"error": "Dữ liệu đầu vào từ getContent không hợp lệ hoặc thiếu kịch bản."}
 
         scenes = content_output.get("script_scenes", [])
         creator_name = content_output.get("metadata", {}).get("creator", "Creator")
-        
+
         total_words = 0
         total_seconds = 0
 
-        # 2. Xử lý thuật toán mô phỏng dựa trên text của kịch bản
         for scene in scenes:
             voiceover = scene.get("audio_voiceover", "")
-            # Loại bỏ các ký tự nằm trong ngoặc vuông [Nhạc nền/SFX] để đếm từ thoại chuẩn
             clean_voiceover = re.sub(r'\[.*?\]', '', voiceover).strip()
             word_count = len(clean_voiceover.split())
             total_words += word_count
 
-            # Bóc tách giây từ chuỗi "00:45 - 00:60" -> Lấy số 60 làm tổng giây
             time_range = scene.get("time", "00:00 - 00:00")
             try:
                 end_time_str = time_range.split("-")[1].strip()
@@ -351,12 +377,10 @@ Final Answer: <your final response to the user>"""
                 if seconds > total_seconds:
                     total_seconds = seconds
             except (IndexError, ValueError):
-                total_seconds = 60 # Fallback mặc định nếu format lỗi
+                total_seconds = 60
 
-        # 3. Tính toán Tốc độ nói mô phỏng (WPM - Words Per Minute)
-        # Công thức: (Tổng số từ / Tổng số giây) * 60 giây
         wpm = (total_words / total_seconds) * 60 if total_seconds > 0 else 0
-        
+
         if wpm > 150:
             speaking_pace = "Bắn rap / Dồn dập (Cực kỳ hợp với TikTok Shorts / Reels)"
         elif wpm < 110:
@@ -364,7 +388,6 @@ Final Answer: <your final response to the user>"""
         else:
             speaking_pace = "Vừa phải / Chuẩn điện ảnh"
 
-        # 4. Phân bổ cấu trúc thời lượng hình học (Retention Structure)
         hook_sec = 5
         cta_sec = 15
         body_sec = total_seconds - (hook_sec + cta_sec)
@@ -375,14 +398,12 @@ Final Answer: <your final response to the user>"""
             "cta_segment": f"{cta_sec}s (Chiếm {round((cta_sec/total_seconds)*100, 1)}% tổng thời lượng) - Kêu gọi tương tác"
         }
 
-        # 5. Tự động sinh Khuyến nghị tối ưu (Optimization Tips)
         optimization_recommendations = [
             f"Tốc độ nói trung bình đạt {round(wpm)} từ/phút ({speaking_pace}). {creator_name} cần giữ nhịp điệu này để không bị tụt tương tác.",
             f"Phần 'The Body' kéo dài {body_sec}s, khuyến nghị chèn thêm ít nhất 4-5 source quay B-roll (cận cảnh món ăn/địa điểm) để tránh tạo cảm giác nhàm chán.",
             "Đoạn kết kêu gọi hành động (CTA) dài 15s có rủi ro bị người dùng lướt qua sớm. Hãy lồng thêm câu hỏi gây tranh cãi ở giây thứ 50 để kích thích comment."
         ]
 
-        # 6. Trả về kết quả phân tích sạch sẽ
         return {
             "status": "success",
             "video_duration_analysis": {
@@ -395,47 +416,45 @@ Final Answer: <your final response to the user>"""
             "retention_insights": optimization_recommendations
         }
 
-
+    @staticmethod
     def getScene(content_output: dict) -> dict:
-        """
-        Tool chuyển đổi kịch bản chữ thành Bản phân cảnh quay chi tiết (Shot List).
-        Tự động phân tích bối cảnh để gợi ý Góc máy (Shot Type), Chuyển động (Movement) và Đạo cụ.
-        
-        Input: Output (Dictionary) của hàm getContent.
-        Output: Danh sách các cảnh quay chi tiết phục vụ việc bấm máy quay (Mock Data).
-        """
-        # 1. Kiểm tra tính hợp lệ của dữ liệu đầu vào
         if content_output.get("status") != "success":
             return {"error": "Dữ liệu đầu vào từ getContent không hợp lệ."}
 
         script_scenes = content_output.get("script_scenes", [])
         creator_name = content_output.get("metadata", {}).get("creator", "Creator")
-    
+
         shot_list = []
-    
-        # Danh sách các góc máy và chuyển động để map mô phỏng theo thứ tự logic của video ngắn
-        shot_types = ["Extreme Close-up (Đặc tả biểu cảm mặt)", "Medium Shot (Trung cảnh ngang ngực)", "POV (Góc nhìn thứ nhất)", "Wide Shot (Toàn cảnh bối cảnh)"]
-        camera_movements = ["Static (Giữ máy cố định)", "Push-in (Dịch máy vào gần chậm)", "Pan Left/Right (Quét máy sang ngang)", "Handheld (Cầm tay rung lắc tự nhiên)"]
-    
-    # 2. Vòng lặp tự động "chuyển thể" từng phân cảnh chữ thành thông số kỹ thuật quay
+
+        shot_types = [
+            "Extreme Close-up (Đặc tả biểu cảm mặt)",
+            "Medium Shot (Trung cảnh ngang ngực)",
+            "POV (Góc nhìn thứ nhất)",
+            "Wide Shot (Toàn cảnh bối cảnh)"
+        ]
+        camera_movements = [
+            "Static (Giữ máy cố định)",
+            "Push-in (Dịch máy vào gần chậm)",
+            "Pan Left/Right (Quét máy sang ngang)",
+            "Handheld (Cầm tay rung lắc tự nhiên)"
+        ]
+
         for idx, scene in enumerate(script_scenes):
             time_frame = scene.get("time", "00:00")
             visual_desc = scene.get("visual", "")
-        
-        # Phân bổ góc quay thông minh dựa theo thứ tự phân cảnh (Mở màn thường quay Toàn/Cận, giữa clip quay POV/Trung)
+
             shot_type = shot_types[idx % len(shot_types)]
             movement = camera_movements[idx % len(camera_movements)]
-        
-        # Tạo hướng dẫn quay thực tế dựa trên số cảnh
+
             if idx == 0:
                 director_note = "Phải giữ chân người xem trong 3 giây đầu. Mặt Creator phải biểu cảm thật cường điệu hoặc đứng ở vị trí gây tò mò."
                 props = "Điện thoại quay, Mic không dây gắn áo."
             elif idx == len(script_scenes) - 1:
                 director_note = "Cảnh kết thúc, Creator nhìn thẳng vào ống kính để kêu gọi comment hành động. Text CTA nhảy ra bên cạnh tai."
                 props = "Sản phẩm/Đạo cụ đặc trưng của kênh để tạo độ nhận diện."
-        else:
-            director_note = "Quay B-roll chèn xen kẽ liên tục mỗi 2 giây một góc máy khác để người xem không bị nhàm chán."
-            props = "Chân máy (Tripod) di động hoặc Gimbal cầm tay."
+            else:
+                director_note = "Quay B-roll chèn xen kẽ liên tục mỗi 2 giây một góc máy khác để người xem không bị nhàm chán."
+                props = "Chân máy (Tripod) di động hoặc Gimbal cầm tay."
 
             shot_item = {
                 "scene_number": idx + 1,
@@ -453,17 +472,147 @@ Final Answer: <your final response to the user>"""
             }
             shot_list.append(shot_item)
 
-    # 3. Trả về kết quả Bản phân cảnh quay sạch sẽ
         return {
             "status": "success",
             "storyboard_summary": {
                 "total_shots_to_film": len(shot_list),
                 "estimated_shooting_time": "30 - 45 phút tại hiện trường",
                 "aspect_ratio_target": "9:16 (Dọc - TikTok/Shorts/Reels)"
-        },
-        "detailed_shot_list": shot_list
+            },
+            "detailed_shot_list": shot_list
         }
-        
+
+    @staticmethod
+    def generate_seo_metadata(content_output: dict, platform: str = "tiktok") -> dict:
+        if content_output.get("status") != "success":
+            return {"error": "Dữ liệu đầu vào từ getContent không hợp lệ hoặc thiếu kịch bản."}
+
+        valid_platforms = ["tiktok", "youtube_shorts", "reels"]
+        platform = platform.lower().strip()
+        if platform not in valid_platforms:
+            return {"error": f"Platform không hợp lệ: '{platform}'. Hãy chọn một trong: {', '.join(valid_platforms)}"}
+
+        metadata = content_output.get("metadata", {})
+        title_suggestions = content_output.get("title_suggestions", [])
+        script_scenes = content_output.get("script_scenes", [])
+
+        creator_name = metadata.get("creator", "Creator")
+        tone = metadata.get("tone_applied", "hài hước")
+        video_format = metadata.get("format", "POV Shorts")
+
+        all_voiceover = " ".join(
+            re.sub(r'\[.*?\]', '', scene.get("audio_voiceover", "")).strip()
+            for scene in script_scenes
+        )
+
+        seo_title = title_suggestions[0] if title_suggestions else f"Khám phá bí mật cùng {creator_name}!"
+
+        title_char_limits = {"tiktok": 100, "youtube_shorts": 100, "reels": 125}
+        limit = title_char_limits[platform]
+        if len(seo_title) > limit:
+            seo_title = seo_title[:limit - 3] + "..."
+
+        first_scene_context = script_scenes[0].get("audio_voiceover", "") if script_scenes else ""
+        clean_first_line = re.sub(r'\[.*?\]', '', first_scene_context).strip()
+        hook_preview = clean_first_line[:120] + "..." if len(clean_first_line) > 120 else clean_first_line
+
+        desc_templates = {
+            "tiktok": (
+                f"{hook_preview}\n\n"
+                f"👉 Theo dõi {creator_name} để không bỏ lỡ những góc nhìn độc lạ!\n"
+                f"💬 Comment trải nghiệm của bạn bên dưới nhé!"
+            ),
+            "youtube_shorts": (
+                f"{hook_preview}\n\n"
+                f"🔔 Subscribe {creator_name} để xem thêm video hài hước & chân thực!\n"
+                f"📌 Video thuộc series: {video_format}\n"
+                f"👍 Like nếu bạn thấy hữu ích!"
+            ),
+            "reels": (
+                f"{hook_preview}\n\n"
+                f"Save lại để xem khi cần! 🔖\n"
+                f"Tag bạn bè mày vào đây 👇\n"
+                f"Follow {creator_name} để cập nhật thêm!"
+            ),
+        }
+        description = desc_templates[platform]
+
+        def _sanitize_hashtag(tag: str) -> str:
+            """Strip # prefix, normalize via clean_input (removes diacritics/spaces), re-add #."""
+            raw = tag.lstrip("#")
+            return "#" + clean_input(raw).replace("_", "")
+
+        base_hashtags = ["#dulich", "#reviewdulich", "#khampha", "#vietnam", "#travel"]
+
+        # Keys normalized so matching works regardless of input diacritics
+        tone_hashtag_map = {
+            "hai huoc": ["#haivl", "#chiembi", "#hamhui"],
+            "cham biem": ["#chiembi", "#noisuthat", "#gocnhinkhac"],
+            "chan thuc": ["#reallife", "#noisuthat", "#khongfilter"],
+        }
+        # Normalize the tone value before lookup
+        tone_normalized = clean_input(tone).replace("_", " ")
+        tone_key = next((k for k in tone_hashtag_map if k in tone_normalized), None)
+        tone_hashtags = tone_hashtag_map.get(tone_key, ["#creator", "#content"])
+
+        platform_hashtag_map = {
+            "tiktok": ["#tiktokdulich", "#tiktokvietnam", "#foryou", "#fyp", "#xuhuong"],
+            "youtube_shorts": ["#shorts", "#youtubeshorts", "#shortvideo"],
+            "reels": ["#reels", "#reelsviral", "#instareels"],
+        }
+        platform_hashtags = platform_hashtag_map[platform]
+
+        # Sanitize every hashtag: remove diacritics, remove spaces, lowercase
+        all_hashtags = list(dict.fromkeys(
+            _sanitize_hashtag(h)
+            for h in base_hashtags + tone_hashtags + platform_hashtags
+        ))
+
+        hashtag_limits = {"tiktok": 10, "youtube_shorts": 8, "reels": 15}
+        final_hashtags = all_hashtags[:hashtag_limits[platform]]
+
+        stopwords = {"là", "và", "của", "có", "một", "để", "với", "cho", "bạn", "này",
+                     "mình", "cái", "rồi", "thì", "nhé", "đi", "ra", "lên", "vào", "đây"}
+        raw_words = re.findall(r'\b\w{4,}\b', all_voiceover.lower())
+        word_freq: Dict[str, int] = {}
+        for w in raw_words:
+            if w not in stopwords:
+                word_freq[w] = word_freq.get(w, 0) + 1
+        top_keywords = sorted(word_freq, key=lambda x: word_freq[x], reverse=True)[:8]
+
+        posting_tips_map = {
+            "tiktok": [
+                "Đăng vào khung giờ vàng: 11h-13h trưa hoặc 19h-21h tối (giờ Việt Nam).",
+                "Dùng âm thanh trending trong vòng 48h để tăng đề xuất từ thuật toán.",
+                "Reply comment trong 30 phút đầu sau khi đăng để boost tương tác.",
+            ],
+            "youtube_shorts": [
+                "Thêm chapter/timestamp trong description dù video ngắn — giúp tăng SEO.",
+                "Đặt thumbnail giật gân với biểu cảm cường điệu của Creator.",
+                "Đăng vào thứ 3, thứ 5 hoặc thứ 7 trong khung 17h-20h.",
+            ],
+            "reels": [
+                "Chia sẻ Reels lên Story ngay sau khi đăng để tăng reach ban đầu.",
+                "Dùng tối đa 3-5 hashtag lớn + 5-10 hashtag ngách thay vì toàn hashtag triệu view.",
+                "Caption nên kết thúc bằng câu hỏi mở để kích thích comment.",
+            ],
+        }
+
+        return {
+            "status": "success",
+            "platform": platform,
+            "seo_title": seo_title,
+            "description": description,
+            "hashtags": final_hashtags,
+            "hashtag_string": " ".join(final_hashtags),
+            "top_keywords": top_keywords,
+            "posting_tips": posting_tips_map[platform],
+        }
+
+    # ─────────────────────────────────────────────
+    # Tool dispatcher
+    # ─────────────────────────────────────────────
+
     def _execute_tool(self, tool_name: str, args: str) -> str:
         import json
 
@@ -473,14 +622,15 @@ Final Answer: <your final response to the user>"""
 
         try:
             if tool_name == "getActivity":
-                # args: "Ha Noi, am_thuc"
                 parts = [a.strip().strip("\"'") for a in args.split(",", 1)]
                 result = ReActAgent.getActivity(*parts)
 
             elif tool_name == "getContent":
-                # args: <json_dict>, <json_dict> [, <json_dict>]
                 parsed = json.loads(f"[{args}]")
                 result = ReActAgent.getContent(*parsed)
+                # FIX 3: auto-save for follow-up tool calls
+                if isinstance(result, dict) and result.get("status") == "success":
+                    self.last_content_output = result
 
             elif tool_name == "GetDuration":
                 parsed = json.loads(args)
@@ -489,6 +639,15 @@ Final Answer: <your final response to the user>"""
             elif tool_name == "getScene":
                 parsed = json.loads(args)
                 result = ReActAgent.getScene(parsed)
+
+            elif tool_name == "generate_seo_metadata":
+                parsed = json.loads(args)
+                if isinstance(parsed, list) and len(parsed) == 2:
+                    result = ReActAgent.generate_seo_metadata(parsed[0], parsed[1])
+                elif isinstance(parsed, list) and len(parsed) == 1:
+                    result = ReActAgent.generate_seo_metadata(parsed[0])
+                else:
+                    return "Error executing 'generate_seo_metadata': expected JSON array with [content_output, platform] or [content_output]."
 
             else:
                 return f"Tool '{tool_name}' is registered but has no handler."
